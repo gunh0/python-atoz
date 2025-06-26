@@ -1,16 +1,18 @@
-"""Code reviewer v1 — parse the code with `ast` and flag eval/exec
+"""Code reviewer v2 — add rules for shell=True and bare `except:`
 
-https://cwe.mitre.org/data/definitions/95.html
+https://cwe.mitre.org/data/definitions/78.html
+https://cwe.mitre.org/data/definitions/396.html
 
-Code that is fluent and confidently commented is exactly the code that
-slips through review. "Evaluate a math expression from the form" becomes
-`eval(expression)`; "load a plugin" becomes `exec(source)`. Both run arbitrary
-code chosen by whoever controls the string.
+v1 found eval/exec. The next two things that show up in nearly every batch of
+ops code I review are `subprocess.run(f"ping {host}", shell=True)` — command
+injection as soon as `host` comes from a user — and `try: ... except:` that
+swallows everything, including KeyboardInterrupt, SystemExit and the very bug
+the reviewer is looking for. An f-string makes `shell=True` look tidy; the bare
+except makes a flaky function look robust.
 
-Grepping for "eval" is noisy: it hits `ast.literal_eval`, `model.eval()` and
-comments. Walking the syntax tree lets the reviewer match only real calls to
-the builtins. This first version finds `eval`/`exec` called by name or via
-`builtins.`; later versions add more rules and a proper report.
+v2 turns the single visitor into small rules with IDs so each finding says
+which policy it violates. `os.system`/`os.popen` always use a shell and are
+flagged too; `shell=False` and `except Exception` are left alone here.
 """
 
 import ast
@@ -70,63 +72,81 @@ def predict(model, batch):
     return model(batch)
 '''
 
+
+Finding = tuple[int, str, str]  # (line, rule id, message)
+
 DANGEROUS = {"eval", "exec"}
+SHELL_FUNCS = {("os", "system"), ("os", "popen")}
 
 
-def grep_review(source: str) -> list[int]:
-    """What a quick text search finds: every line mentioning eval/exec."""
-    return [n for n, line in enumerate(source.splitlines(), 1)
-            if any(word in line for word in DANGEROUS)]
+def dotted(node: ast.expr) -> tuple[str, ...]:
+    """`subprocess.run` -> ("subprocess", "run"); anything else -> ()."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return tuple(reversed(parts))
+    return ()
 
 
 class Reviewer(ast.NodeVisitor):
     def __init__(self) -> None:
-        self.findings: list[tuple[int, str]] = []
+        self.findings: list[Finding] = []
+
+    def report(self, node: ast.AST, rule: str, message: str) -> None:
+        self.findings.append((node.lineno, rule, message))
 
     def visit_Call(self, node: ast.Call) -> None:
-        func = node.func
-        name = None
-        if isinstance(func, ast.Name) and func.id in DANGEROUS:
-            name = func.id
-        elif (isinstance(func, ast.Attribute) and func.attr in DANGEROUS
-              and isinstance(func.value, ast.Name) and func.value.id == "builtins"):
-            name = f"builtins.{func.attr}"
-        if name:
-            self.findings.append((node.lineno, f"call to {name}() runs arbitrary code"))
+        name = dotted(node.func)
+        if name in {(n,) for n in DANGEROUS} | {("builtins", n) for n in DANGEROUS}:
+            self.report(node, "REV001", f"call to {'.'.join(name)}() runs arbitrary code")
+        for kw in node.keywords:
+            if (kw.arg == "shell" and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True):
+                self.report(node, "REV002", f"{'.'.join(name) or 'call'}(..., shell=True): "
+                                            "pass an argument list instead")
+        if name in SHELL_FUNCS:
+            self.report(node, "REV002", f"{'.'.join(name)}() always runs a shell")
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is None:
+            self.report(node, "REV003", "bare except: also catches KeyboardInterrupt/SystemExit")
         self.generic_visit(node)
 
 
-def review(source: str) -> list[tuple[int, str]]:
+def review(source: str) -> list[Finding]:
     reviewer = Reviewer()
     reviewer.visit(ast.parse(source))
-    return reviewer.findings
+    return sorted(reviewer.findings)
 
 
 def main() -> None:
-    lines = SAMPLE.splitlines()
-    hits = grep_review(SAMPLE)
-    print(f"grep:     {len(hits)} lines mention eval/exec")
-    for n in hits:
-        print(f"  {n:>3}: {lines[n - 1].strip()}")
-    print()
     findings = review(SAMPLE)
-    print(f"reviewer: {len(findings)} findings")
-    for n, message in findings:
-        print(f"  {n:>3}: {message}")
+    print(f"reviewer v2: {len(findings)} findings")
+    for line, rule, message in findings:
+        print(f"  {line:>3} {rule}: {message}")
+
+    snippets = {
+        "os.system backup": "import os\nos.system('tar czf /backup/site.tgz ' + path)\n",
+        "argument list": "import subprocess\nsubprocess.run(['ping', '-c', '1', host], check=True)\n",
+    }
+    for label, code in snippets.items():
+        found = review(code)
+        print(f"{label + ':':<18} {len(found)} findings {[rule for _, rule, _ in found]}")
 
 
 if __name__ == "__main__":
     main()
 
 # Output:
-# grep:     5 lines mention eval/exec
-#     9: return eval(expression)
-#    14: exec(source_code, namespace)
-#    19: return builtins.eval(code)
-#    23: return ast.literal_eval(text)
-#    50: model.eval()  # switch to inference mode
-#
-# reviewer: 3 findings
-#     9: call to eval() runs arbitrary code
-#    14: call to exec() runs arbitrary code
-#    19: call to builtins.eval() runs arbitrary code
+# reviewer v2: 5 findings
+#     9 REV001: call to eval() runs arbitrary code
+#    14 REV001: call to exec() runs arbitrary code
+#    19 REV001: call to builtins.eval() runs arbitrary code
+#    27 REV002: subprocess.run(..., shell=True): pass an argument list instead
+#    33 REV003: bare except: also catches KeyboardInterrupt/SystemExit
+# os.system backup:  1 findings ['REV002']
+# argument list:     0 findings []
