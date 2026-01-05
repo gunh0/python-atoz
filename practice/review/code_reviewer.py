@@ -1,21 +1,24 @@
-"""Code reviewer v2 — add rules for shell=True and bare `except:`
+"""Code reviewer v3 — mutable default arguments and `assert` as validation
 
-https://cwe.mitre.org/data/definitions/78.html
-https://cwe.mitre.org/data/definitions/396.html
+https://docs.python.org/3/reference/compound_stmts.html#function-definitions
+https://docs.python.org/3/reference/simple_stmts.html#the-assert-statement
 
-v1 found eval/exec. The next two things that show up in nearly every batch of
-ops code I review are `subprocess.run(f"ping {host}", shell=True)` — command
-injection as soon as `host` comes from a user — and `try: ... except:` that
-swallows everything, including KeyboardInterrupt, SystemExit and the very bug
-the reviewer is looking for. An f-string makes `shell=True` look tidy; the bare
-except makes a flaky function look robust.
+Two Python-specific mistakes that are easy to make with a straight face:
 
-v2 turns the single visitor into small rules with IDs so each finding says
-which policy it violates. `os.system`/`os.popen` always use a shell and are
-flagged too; `shell=False` and `except Exception` are left alone here.
+`def add_tag(tag, tags=[])` — the default list is created once, when the
+function is defined, and shared by every call. The second caller sees the
+first caller's tags. Use `None` and create the list inside.
+
+`assert amount > 0, "amount must be positive"` as input validation — asserts
+are removed when Python runs with `-O` (some container images and packagers do
+this), so the check silently disappears. Raise ValueError/PermissionError for
+validation; keep assert for internal invariants and tests. v3 flags asserts
+outside `test_*` functions and demonstrates both bugs actually happening.
 """
 
 import ast
+import subprocess
+import sys
 
 # Sample code under review: a small ops helper service, written the common way.
 SAMPLE = '''\
@@ -77,6 +80,7 @@ Finding = tuple[int, str, str]  # (line, rule id, message)
 
 DANGEROUS = {"eval", "exec"}
 SHELL_FUNCS = {("os", "system"), ("os", "popen")}
+MUTABLE_CALLS = {"list", "dict", "set", "bytearray", "defaultdict", "deque"}
 
 
 def dotted(node: ast.expr) -> tuple[str, ...]:
@@ -94,6 +98,7 @@ def dotted(node: ast.expr) -> tuple[str, ...]:
 class Reviewer(ast.NodeVisitor):
     def __init__(self) -> None:
         self.findings: list[Finding] = []
+        self.functions: list[str] = []  # enclosing function names
 
     def report(self, node: ast.AST, rule: str, message: str) -> None:
         self.findings.append((node.lineno, rule, message))
@@ -116,6 +121,27 @@ class Reviewer(ast.NodeVisitor):
             self.report(node, "REV003", "bare except: also catches KeyboardInterrupt/SystemExit")
         self.generic_visit(node)
 
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for default in node.args.defaults + [d for d in node.args.kw_defaults if d]:
+            literal = isinstance(default, (ast.List, ast.Dict, ast.Set))
+            factory = isinstance(default, ast.Call) and dotted(default.func)[-1:] in {
+                (name,) for name in MUTABLE_CALLS}
+            if literal or factory:
+                self.report(default, "REV004", f"{node.name}(): mutable default "
+                                               f"{ast.unparse(default)} is shared between calls")
+        self.functions.append(node.name)
+        self.generic_visit(node)
+        self.functions.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Assert(self, node: ast.Assert) -> None:
+        where = self.functions[-1] if self.functions else "<module>"
+        if not where.startswith("test"):
+            self.report(node, "REV005", f"{where}(): assert {ast.unparse(node.test)} "
+                                        "is removed under python -O")
+        self.generic_visit(node)
+
 
 def review(source: str) -> list[Finding]:
     reviewer = Reviewer()
@@ -123,30 +149,44 @@ def review(source: str) -> list[Finding]:
     return sorted(reviewer.findings)
 
 
+def show_bugs() -> None:
+    namespace: dict = {}
+    exec(compile(SAMPLE, "<sample>", "exec"), namespace)  # our own fixture, not user input
+    add_tag = namespace["add_tag"]
+    add_tag("prod")
+    second = add_tag("db")
+    print(f"add_tag('prod') then add_tag('db') -> second call returned {second}")
+
+    probe = SAMPLE + "\nprint(transfer(-500, type('U', (), {'is_admin': False})()))\n"
+    for label, flags in (("python   ", []), ("python -O", ["-O"])):
+        run = subprocess.run([sys.executable, *flags, "-c", probe], capture_output=True, text=True)
+        outcome = run.stdout.strip() or run.stderr.strip().splitlines()[-1]
+        print(f"{label} transfer(-500, non-admin) -> {outcome}")
+
+
 def main() -> None:
     findings = review(SAMPLE)
-    print(f"reviewer v2: {len(findings)} findings")
+    print(f"reviewer v3: {len(findings)} findings")
     for line, rule, message in findings:
         print(f"  {line:>3} {rule}: {message}")
-
-    snippets = {
-        "os.system backup": "import os\nos.system('tar czf /backup/site.tgz ' + path)\n",
-        "argument list": "import subprocess\nsubprocess.run(['ping', '-c', '1', host], check=True)\n",
-    }
-    for label, code in snippets.items():
-        found = review(code)
-        print(f"{label + ':':<18} {len(found)} findings {[rule for _, rule, _ in found]}")
+    print()
+    show_bugs()
 
 
 if __name__ == "__main__":
     main()
 
 # Output:
-# reviewer v2: 5 findings
+# reviewer v3: 8 findings
 #     9 REV001: call to eval() runs arbitrary code
 #    14 REV001: call to exec() runs arbitrary code
 #    19 REV001: call to builtins.eval() runs arbitrary code
 #    27 REV002: subprocess.run(..., shell=True): pass an argument list instead
 #    33 REV003: bare except: also catches KeyboardInterrupt/SystemExit
-# os.system backup:  1 findings ['REV002']
-# argument list:     0 findings []
+#    38 REV004: add_tag(): mutable default [] is shared between calls
+#    44 REV005: transfer(): assert amount > 0 is removed under python -O
+#    45 REV005: transfer(): assert user.is_admin is removed under python -O
+#
+# add_tag('prod') then add_tag('db') -> second call returned ['prod', 'db']
+# python    transfer(-500, non-admin) -> AssertionError: amount must be positive
+# python -O transfer(-500, non-admin) -> -500
