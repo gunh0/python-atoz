@@ -1,19 +1,24 @@
-"""cron_expr v1 — parse a five-field cron expression into explicit value sets
+"""cron_expr v2 — next-run calculator, with cron's day-of-month/day-of-week OR
 
-Reviewing crontabs across a fleet means answering "when does this actually
-run?" for lines like `*/15 2-5 * * mon-fri`. v1 is the parser: it expands
-each field into the set of values it allows, which is also the best way to
-find mistakes before cron silently ignores or misreads a line.
+v1 expanded the fields; v2 answers the question people actually ask in a
+change review: "when will this run next?". next_runs() walks forward from
+a reference time, skipping a whole month, day or hour as soon as that field
+cannot match, so even "29 February only" is found in a few thousand steps.
+An expression that can never fire (31 February) raises instead of looping.
 
-Supported, as in Vixie cron / cronie: `*`, numbers, ranges `a-b`, steps
-`*/n`, `a-b/n` and `a/n` (from a to the field maximum), comma lists, month
-and weekday names (jan, mon), 7 as an alias for Sunday, and the @hourly,
-@daily, @weekly, @monthly and @yearly macros. Errors name the field and the
-offending token. A step of 0 and reversed ranges like 5-2 are rejected
-(some crons accept them with surprising results). @reboot has no times and
-is reported as such rather than guessed at.
+The rule everyone gets wrong: when both day-of-month and day-of-week are
+restricted, cron runs when EITHER matches. `0 0 1-7 * sun` is not "first
+Sunday of the month" but "days 1-7, and also every Sunday". Vixie cron and
+cronie decide "restricted" by whether the field starts with `*`, so
+`*/2` counts as unrestricted and is ANDed with the weekday instead.
+
+Times are naive wall-clock times, as cron itself uses; the reference time
+is fixed so the output is stable. Around DST changes real crons differ
+(cronie runs a skipped 02:30 job once after the jump), so keep critical
+jobs out of the 01:00-03:00 window or run the host in UTC.
 """
 
+import datetime as dt
 from dataclasses import dataclass
 
 FIELDS = [  # name, min, max
@@ -31,6 +36,10 @@ MACROS = {
     "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *",
     "@weekly": "0 0 * * 0", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *",
 }
+
+
+WEEKDAY_NAMES = "Mon Tue Wed Thu Fri Sat Sun".split()
+SEARCH_YEARS = 9  # leap days can be 8 years apart (2096 -> 2104)
 
 
 class CronError(ValueError):
@@ -124,41 +133,100 @@ def describe(cron: Cron) -> str:
     return "  ".join(f"{lab}={compact(s, *lim)}" for lab, s, lim in zip(labels, sets, limits))
 
 
+def day_matches(cron: Cron, t: dt.datetime) -> bool:
+    dom_ok = t.day in cron.days
+    dow_ok = (t.weekday() + 1) % 7 in cron.weekdays  # Python: Mon=0, cron: Sun=0
+    if cron.dom_restricted and cron.dow_restricted:
+        return dom_ok or dow_ok
+    return dom_ok and dow_ok
+
+
+def next_run(cron: Cron, after: dt.datetime) -> dt.datetime:
+    """First minute strictly after `after` at which cron would start the job."""
+    t = after.replace(second=0, microsecond=0) + dt.timedelta(minutes=1)
+    limit = after + dt.timedelta(days=366 * SEARCH_YEARS)
+    while t <= limit:
+        if t.month not in cron.months:
+            t = (t.replace(day=1, hour=0, minute=0) + dt.timedelta(days=32)).replace(day=1)
+        elif not day_matches(cron, t):
+            t = t.replace(hour=0, minute=0) + dt.timedelta(days=1)
+        elif t.hour not in cron.hours:
+            t = t.replace(minute=0) + dt.timedelta(hours=1)
+        elif t.minute not in cron.minutes:
+            t += dt.timedelta(minutes=1)
+        else:
+            return t
+    raise CronError(f"never fires within {SEARCH_YEARS} years")
+
+
+def next_runs(cron: Cron, after: dt.datetime, count: int) -> list[dt.datetime]:
+    runs = []
+    for _ in range(count):
+        after = next_run(cron, after)
+        runs.append(after)
+    return runs
+
+
+def fmt(t: dt.datetime) -> str:
+    return f"{WEEKDAY_NAMES[t.weekday()]} {t:%Y-%m-%d %H:%M}"
+
+
 def main() -> None:
+    now = dt.datetime(2026, 3, 14, 9, 26, 41)  # a Saturday
+    print(f"reference time: {fmt(now)}:41")
     lines = [
-        "*/15 2-5 * * mon-fri",
-        "0 3 * * 7",
-        "30 4 1,15 * *",
-        "5/20 * * jan-mar,dec *",
-        "@weekly",
-        "0 0 1-7 * sun",
-        "0 24 * * *",
-        "*/0 * * * *",
-        "0 5-2 * * *",
-        "0 9 * * tuesday",
-        "15 3 * *",
-        "@reboot",
+        ("*/15 2-5 * * mon-fri", 3),
+        ("@weekly", 2),
+        ("30 4 1,15 * *", 3),
+        ("0 0 1-7 * sun", 5),
+        ("0 9 */2 * mon", 3),
+        ("0 12 29 2 *", 2),
+        ("0 0 31 2 *", 1),
     ]
-    for line in lines:
+    for expr, count in lines:
+        print(f"\n{expr}   ({describe(parse(expr))})")
         try:
-            print(f"{line:<24} {describe(parse(line))}")
+            for t in next_runs(parse(expr), now, count):
+                print(f"  {fmt(t)}")
         except CronError as exc:
-            print(f"{line:<24} ERROR {exc}")
+            print(f"  ERROR {exc}")
 
 
 if __name__ == "__main__":
     main()
 
 # Output:
-# */15 2-5 * * mon-fri     min=0,15,30,45  hour=2-5  dom=*  mon=*  dow=1-5
-# 0 3 * * 7                min=0  hour=3  dom=*  mon=*  dow=0
-# 30 4 1,15 * *            min=30  hour=4  dom=1,15  mon=*  dow=*
-# 5/20 * * jan-mar,dec *   min=5,25,45  hour=*  dom=*  mon=1-3,12  dow=*
-# @weekly                  min=0  hour=0  dom=*  mon=*  dow=0
-# 0 0 1-7 * sun            min=0  hour=0  dom=1-7  mon=*  dow=0
-# 0 24 * * *               ERROR hour: 24 is outside 0-23
-# */0 * * * *              ERROR minute: bad step in '*/0'
-# 0 5-2 * * *              ERROR hour: reversed range '5-2'
-# 0 9 * * tuesday          ERROR day of week: 'tuesday' is not a number or name
-# 15 3 * *                 ERROR expected 5 fields, got 4
-# @reboot                  ERROR @reboot runs at boot, it has no schedule to compute
+# reference time: Sat 2026-03-14 09:26:41
+#
+# */15 2-5 * * mon-fri   (min=0,15,30,45  hour=2-5  dom=*  mon=*  dow=1-5)
+#   Mon 2026-03-16 02:00
+#   Mon 2026-03-16 02:15
+#   Mon 2026-03-16 02:30
+#
+# @weekly   (min=0  hour=0  dom=*  mon=*  dow=0)
+#   Sun 2026-03-15 00:00
+#   Sun 2026-03-22 00:00
+#
+# 30 4 1,15 * *   (min=30  hour=4  dom=1,15  mon=*  dow=*)
+#   Sun 2026-03-15 04:30
+#   Wed 2026-04-01 04:30
+#   Wed 2026-04-15 04:30
+#
+# 0 0 1-7 * sun   (min=0  hour=0  dom=1-7  mon=*  dow=0)
+#   Sun 2026-03-15 00:00
+#   Sun 2026-03-22 00:00
+#   Sun 2026-03-29 00:00
+#   Wed 2026-04-01 00:00
+#   Thu 2026-04-02 00:00
+#
+# 0 9 */2 * mon   (min=0  hour=9  dom=1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31  mon=*  dow=1)
+#   Mon 2026-03-23 09:00
+#   Mon 2026-04-13 09:00
+#   Mon 2026-04-27 09:00
+#
+# 0 12 29 2 *   (min=0  hour=12  dom=29  mon=2  dow=*)
+#   Tue 2028-02-29 12:00
+#   Sun 2032-02-29 12:00
+#
+# 0 0 31 2 *   (min=0  hour=0  dom=31  mon=2  dow=*)
+#   ERROR never fires within 9 years
