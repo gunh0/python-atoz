@@ -1,24 +1,23 @@
-"""Code reviewer v3 — mutable default arguments and `assert` as validation
+"""Code reviewer v4 — a report with locations, severities and a CI gate
 
-https://docs.python.org/3/reference/compound_stmts.html#function-definitions
-https://docs.python.org/3/reference/simple_stmts.html#the-assert-statement
+https://docs.python.org/3/library/ast.html
 
-Two Python-specific mistakes that are easy to make with a straight face:
+v1–v3 collected rules; v4 makes the output something a reviewer and a CI job
+can act on. Every finding carries file:line:col, a severity and the offending
+source line, the report is sorted by location, and a summary decides the gate:
+any HIGH finding fails the build (a CI wrapper would `sys.exit(gate(...))`).
 
-`def add_tag(tag, tags=[])` — the default list is created once, when the
-function is defined, and shared by every call. The second caller sees the
-first caller's tags. Use `None` and create the list inside.
-
-`assert amount > 0, "amount must be positive"` as input validation — asserts
-are removed when Python runs with `-O` (some container images and packagers do
-this), so the check silently disappears. Raise ValueError/PermissionError for
-validation; keep assert for internal invariants and tests. v3 flags asserts
-outside `test_*` functions and demonstrates both bugs actually happening.
+A tool that cannot be silenced gets uninstalled, so v4 also honours an
+explicit, rule-specific suppression on the same line —
+`# review: ignore[REV001]` — and counts suppressions in the summary so they
+stay visible in review. Code under review should earn its suppressions one by
+one; there is deliberately no file-wide off switch.
 """
 
 import ast
-import subprocess
-import sys
+import re
+from collections import Counter
+from dataclasses import dataclass
 
 # Sample code under review: a small ops helper service, written the common way.
 SAMPLE = '''\
@@ -76,7 +75,28 @@ def predict(model, batch):
 '''
 
 
-Finding = tuple[int, str, str]  # (line, rule id, message)
+RULES = {
+    "REV001": "HIGH",    # eval/exec
+    "REV002": "HIGH",    # shell=True, os.system
+    "REV003": "MEDIUM",  # bare except
+    "REV004": "MEDIUM",  # mutable default argument
+    "REV005": "MEDIUM",  # assert used for validation
+}
+SEVERITY_ORDER = ("HIGH", "MEDIUM", "LOW")
+IGNORE = re.compile(r"#\s*review:\s*ignore\[([A-Z0-9, ]+)\]")
+
+
+@dataclass(frozen=True, order=True)
+class Finding:
+    line: int
+    col: int
+    rule: str
+    message: str
+
+    @property
+    def severity(self) -> str:
+        return RULES[self.rule]
+
 
 DANGEROUS = {"eval", "exec"}
 SHELL_FUNCS = {("os", "system"), ("os", "popen")}
@@ -101,7 +121,7 @@ class Reviewer(ast.NodeVisitor):
         self.functions: list[str] = []  # enclosing function names
 
     def report(self, node: ast.AST, rule: str, message: str) -> None:
-        self.findings.append((node.lineno, rule, message))
+        self.findings.append(Finding(node.lineno, node.col_offset + 1, rule, message))
 
     def visit_Call(self, node: ast.Call) -> None:
         name = dotted(node.func)
@@ -143,50 +163,84 @@ class Reviewer(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def review(source: str) -> list[Finding]:
+def review(source: str) -> tuple[list[Finding], int]:
+    """Return (findings, number of suppressed findings)."""
     reviewer = Reviewer()
     reviewer.visit(ast.parse(source))
-    return sorted(reviewer.findings)
+    lines = source.splitlines()
+    kept, suppressed = [], 0
+    for finding in sorted(reviewer.findings):
+        match = IGNORE.search(lines[finding.line - 1])
+        if match and finding.rule in {r.strip() for r in match.group(1).split(",")}:
+            suppressed += 1
+        else:
+            kept.append(finding)
+    return kept, suppressed
 
 
-def show_bugs() -> None:
-    namespace: dict = {}
-    exec(compile(SAMPLE, "<sample>", "exec"), namespace)  # our own fixture, not user input
-    add_tag = namespace["add_tag"]
-    add_tag("prod")
-    second = add_tag("db")
-    print(f"add_tag('prod') then add_tag('db') -> second call returned {second}")
+def report(filename: str, source: str) -> int:
+    findings, suppressed = review(source)
+    lines = source.splitlines()
+    for f in findings:
+        print(f"{filename}:{f.line}:{f.col}: {f.severity:<6} {f.rule} {f.message}")
+        print(f"    {lines[f.line - 1].strip()}")
+    counts = Counter(f.severity for f in findings)
+    status = gate(findings)
+    print(f"{filename}: " + ", ".join(f"{counts[s]} {s.lower()}" for s in SEVERITY_ORDER)
+          + f", {suppressed} suppressed -> gate {'FAIL' if status else 'PASS'}")
+    return status
 
-    probe = SAMPLE + "\nprint(transfer(-500, type('U', (), {'is_admin': False})()))\n"
-    for label, flags in (("python   ", []), ("python -O", ["-O"])):
-        run = subprocess.run([sys.executable, *flags, "-c", probe], capture_output=True, text=True)
-        outcome = run.stdout.strip() or run.stderr.strip().splitlines()[-1]
-        print(f"{label} transfer(-500, non-admin) -> {outcome}")
+
+def gate(findings: list[Finding]) -> int:
+    return 1 if any(f.severity == "HIGH" for f in findings) else 0
+
+
+# A second file, after a review pass.
+REVIEWED = '''\
+import subprocess
+
+
+def ping(host):
+    return subprocess.run(["ping", "-c", "1", host], capture_output=True, check=False)
+
+
+def render(template, context):
+    # Templates are shipped with the package, never user supplied.
+    return eval(template, {}, context)  # review: ignore[REV001] trusted templates only
+
+
+def add_tags(tag, tags=None):
+    tags = [] if tags is None else tags
+    tags.append(tag)
+    return tags
+'''
 
 
 def main() -> None:
-    findings = review(SAMPLE)
-    print(f"reviewer v3: {len(findings)} findings")
-    for line, rule, message in findings:
-        print(f"  {line:>3} {rule}: {message}")
-    print()
-    show_bugs()
+    statuses = [report("ops_helper.py", SAMPLE), report("reviewed.py", REVIEWED)]
+    print(f"exit status for CI: {max(statuses)}")
 
 
 if __name__ == "__main__":
     main()
 
 # Output:
-# reviewer v3: 8 findings
-#     9 REV001: call to eval() runs arbitrary code
-#    14 REV001: call to exec() runs arbitrary code
-#    19 REV001: call to builtins.eval() runs arbitrary code
-#    27 REV002: subprocess.run(..., shell=True): pass an argument list instead
-#    33 REV003: bare except: also catches KeyboardInterrupt/SystemExit
-#    38 REV004: add_tag(): mutable default [] is shared between calls
-#    44 REV005: transfer(): assert amount > 0 is removed under python -O
-#    45 REV005: transfer(): assert user.is_admin is removed under python -O
-#
-# add_tag('prod') then add_tag('db') -> second call returned ['prod', 'db']
-# python    transfer(-500, non-admin) -> AssertionError: amount must be positive
-# python -O transfer(-500, non-admin) -> -500
+# ops_helper.py:9:12: HIGH   REV001 call to eval() runs arbitrary code
+#     return eval(expression)
+# ops_helper.py:14:5: HIGH   REV001 call to exec() runs arbitrary code
+#     exec(source_code, namespace)
+# ops_helper.py:19:12: HIGH   REV001 call to builtins.eval() runs arbitrary code
+#     return builtins.eval(code)
+# ops_helper.py:27:12: HIGH   REV002 subprocess.run(..., shell=True): pass an argument list instead
+#     return subprocess.run(f"ping -c 1 {host}", shell=True, capture_output=True)
+# ops_helper.py:33:5: MEDIUM REV003 bare except: also catches KeyboardInterrupt/SystemExit
+#     except:
+# ops_helper.py:38:23: MEDIUM REV004 add_tag(): mutable default [] is shared between calls
+#     def add_tag(tag, tags=[]):
+# ops_helper.py:44:5: MEDIUM REV005 transfer(): assert amount > 0 is removed under python -O
+#     assert amount > 0, "amount must be positive"
+# ops_helper.py:45:5: MEDIUM REV005 transfer(): assert user.is_admin is removed under python -O
+#     assert user.is_admin
+# ops_helper.py: 4 high, 4 medium, 0 low, 0 suppressed -> gate FAIL
+# reviewed.py: 0 high, 0 medium, 0 low, 1 suppressed -> gate PASS
+# exit status for CI: 1
