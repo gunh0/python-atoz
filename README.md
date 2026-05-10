@@ -4,9 +4,9 @@ My Python study notes as runnable code: system administration, secure coding, an
 
 | Section | Examples | |
 | --- | ---: | --- |
-| [`sysadmin/`](sysadmin/README.md) | 24 | Server and network operations: inventory, logs, RAID/IPMI/SNMP output, interface counters, scheduling. |
-| [`security/`](security/README.md) | 37 | Secure coding with the standard library: injection, files, web input, parsing, crypto, auth, secrets, supply chain. |
-| [`practice/`](practice/README.md) | 26 | Language pitfalls, data handling, concurrency, reliability and code review checks. |
+| [`sysadmin/`](sysadmin/README.md) | 32 | Server and network operations: inventory, logs, RAID/IPMI/SNMP output, interface counters, scheduling. |
+| [`security/`](security/README.md) | 49 | Secure coding with the standard library: injection, files, web input, parsing, crypto, auth, secrets, supply chain. |
+| [`practice/`](practice/README.md) | 37 | Language pitfalls, data handling, concurrency, reliability and code review checks. |
 | [`Fluent/`](Fluent/README.md) | notebooks | Reading notes for *Fluent Python* |
 | [`HighPerformance/`](HighPerformance/README.md) | notebooks | Reading notes for *High Performance Python* |
 
