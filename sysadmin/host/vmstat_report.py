@@ -1,21 +1,20 @@
-"""vmstat report v2 — also write a real .xlsx by hand with zipfile and XML
+"""vmstat report v3 — grouped header with merged cells, column widths, real dates
 
-The CSV from v1 opens in Excel, but people asked for "a proper spreadsheet"
-(numbers as numbers, no import dialog, one file to attach). You do not need
-a third-party library for that. An .xlsx file is a zip archive of XML parts
-(Office Open XML, ECMA-376), and a valid workbook needs only five of them:
+v2's sheet was correct but looked like a CSV: narrow columns cut off the
+timestamps, eleven flat headers, and times stored as text that Excel cannot
+put on a chart axis. v3 adds the parts that make it a report:
 
-    [Content_Types].xml         which part is which MIME type
-    _rels/.rels                 points at the workbook
-    xl/workbook.xml             the list of sheets
-    xl/_rels/workbook.xml.rels  points at each sheet
-    xl/worksheets/sheet1.xml    the cells
+- row 1 groups the columns (procs, memory, swap, cpu) with <mergeCells>
+- <cols> sets each column width from the longest value in it
+- xl/styles.xml defines bold header styles and a "yyyy-mm-dd hh:mm:ss"
+  number format; the time column is written as an Excel serial date (days
+  since 1899-12-30) using that format, so it sorts and charts as a time
+- <sheetViews> freezes the two header rows while scrolling
 
-Strings are written as inline strings (t="inlineStr"), which avoids the
-shared-string table; numbers are written as <v> values so Excel can sum
-and chart them. Text goes through an XML escaper, because a hostname or a
-process name with "&" or "<" otherwise produces a file Excel refuses to
-open. The proof is reading the file back with zipfile and ElementTree.
+Element order inside <worksheet> is fixed by the schema (sheetViews, cols,
+sheetData, mergeCells); Excel reports a damaged file if it is wrong, so the
+writer emits them in that order. Reading back checks merges, widths and that
+the date survives the round trip.
 """
 
 import csv
@@ -23,6 +22,7 @@ import io
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
+import datetime as dt
 from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
 
@@ -39,6 +39,10 @@ procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----
 
 FIELDS = ["time", "run_queue", "blocked", "free_mib", "cache_mib", "swap_in", "swap_out",
           "cpu_user", "cpu_system", "cpu_iowait", "cpu_busy"]
+GROUPS = [  # header row 1; must cover FIELDS in order
+    ("", 1), ("procs", 2), ("memory (MiB)", 2), ("swap (KiB/s)", 2), ("cpu (%)", 4),
+]
+EXCEL_EPOCH = dt.datetime(1899, 12, 30)  # serial 0; skips Lotus's fake 1900-02-29
 
 
 def parse(text: str) -> list[dict]:
@@ -88,6 +92,7 @@ CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
 <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 </Types>"""
 
 ROOT_RELS = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -98,7 +103,26 @@ ROOT_RELS = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 WORKBOOK_RELS = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="{PKG_REL_NS}">
 <Relationship Id="rId1" Type="{REL_NS}/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="{REL_NS}/styles" Target="styles.xml"/>
 </Relationships>"""
+
+# cellXfs indexes used by cell(): 0 default, 1 group header, 2 column header, 3 date-time
+STYLE_GROUP, STYLE_HEADER, STYLE_DATETIME = 1, 2, 3
+STYLES = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="{NS}">
+<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd hh:mm:ss"/></numFmts>
+<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="4">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+</cellXfs>
+<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>"""
 
 
 def workbook_xml(sheet_name: str) -> str:
@@ -118,49 +142,88 @@ def column_letter(index: int) -> str:
     return letters
 
 
-def cell(ref: str, value) -> str:
+def cell(ref: str, value, style: int = 0) -> str:
+    s = f' s="{style}"' if style else ""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return f'<c r="{ref}"><v>{value}</v></c>'
-    return f'<c r="{ref}" t="inlineStr"><is><t>{escape(str(value))}</t></is></c>'
+        return f'<c r="{ref}"{s}><v>{value}</v></c>'
+    return f'<c r="{ref}"{s} t="inlineStr"><is><t>{escape(str(value))}</t></is></c>'
 
 
-def sheet_xml(rows: list[list]) -> str:
-    out = [f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="{NS}"><sheetData>']
-    for r, row in enumerate(rows, start=1):
-        cells = "".join(cell(f"{column_letter(c)}{r}", v) for c, v in enumerate(row))
-        out.append(f'<row r="{r}">{cells}</row>')
-    out.append("</sheetData></worksheet>")
-    return "".join(out)
+def excel_serial(text: str) -> float:
+    """'2026-03-14 10:00:05 UTC' -> days since 1899-12-30 (the UTC suffix is dropped)."""
+    when = dt.datetime.fromisoformat(text.removesuffix(" UTC"))
+    return (when - EXCEL_EPOCH) / dt.timedelta(days=1)
+
+
+def from_serial(serial: float) -> dt.datetime:
+    return EXCEL_EPOCH + dt.timedelta(seconds=round(serial * 86400))
+
+
+def sheet_xml(records: list[dict]) -> str:
+    rows: list[list[str]] = []
+    row1, merges, col = [], [], 0
+    for title, span in GROUPS:
+        row1.append(cell(f"{column_letter(col)}1", title, STYLE_GROUP))
+        if span > 1:
+            merges.append(f"{column_letter(col)}1:{column_letter(col + span - 1)}1")
+        col += span
+    assert col == len(FIELDS), "GROUPS must cover every field"
+    rows.append(row1)
+    rows.append([cell(f"{column_letter(c)}2", name, STYLE_HEADER) for c, name in enumerate(FIELDS)])
+    for r, rec in enumerate(records, start=3):
+        line = [cell(f"A{r}", excel_serial(rec["time"]), STYLE_DATETIME)]
+        line += [cell(f"{column_letter(c)}{r}", rec[f]) for c, f in enumerate(FIELDS) if c]
+        rows.append(line)
+
+    widths = [20] + [max(len(f), *(len(str(rec[f])) for rec in records)) + 2 for f in FIELDS[1:]]
+    cols = "".join(f'<col min="{i}" max="{i}" width="{w}" customWidth="1"/>' for i, w in enumerate(widths, 1))
+    views = ('<sheetViews><sheetView workbookViewId="0">'
+             '<pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/>'
+             '</sheetView></sheetViews>')
+    data = "".join(f'<row r="{r}">{"".join(cells)}</row>' for r, cells in enumerate(rows, start=1))
+    merge_xml = f'<mergeCells count="{len(merges)}">' + "".join(
+        f'<mergeCell ref="{m}"/>' for m in merges) + "</mergeCells>"
+    return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="{NS}">'
+            f"{views}<cols>{cols}</cols><sheetData>{data}</sheetData>{merge_xml}</worksheet>")
 
 
 def write_xlsx(records: list[dict], path: Path, sheet_name: str) -> None:
-    rows = [FIELDS] + [[rec[f] for f in FIELDS] for rec in records]
     parts = {
         "[Content_Types].xml": CONTENT_TYPES,
         "_rels/.rels": ROOT_RELS,
         "xl/workbook.xml": workbook_xml(sheet_name),
         "xl/_rels/workbook.xml.rels": WORKBOOK_RELS,
-        "xl/worksheets/sheet1.xml": sheet_xml(rows),
+        "xl/styles.xml": STYLES,
+        "xl/worksheets/sheet1.xml": sheet_xml(records),
     }
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name, xml in parts.items():
             zf.writestr(name, xml)
 
 
-def read_xlsx(path: Path) -> tuple[list[str], str, dict[str, str]]:
-    """Return (part names, sheet name, {cell ref: value as text})."""
+def read_xlsx(path: Path) -> dict:
+    """Read back what a reviewer would check: cells, styles, merges, widths."""
     ns = {"m": NS}
     with zipfile.ZipFile(path) as zf:
         names = zf.namelist()
-        sheet = ET.fromstring(zf.read("xl/workbook.xml")).find("m:sheets/m:sheet", ns).get("name")
-        root = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
-    cells = {}
-    for c in root.iter(f"{{{NS}}}c"):
-        if c.get("t") == "inlineStr":
-            cells[c.get("r")] = c.find("m:is/m:t", ns).text
-        else:
-            cells[c.get("r")] = c.find("m:v", ns).text
-    return names, sheet, cells
+        sheet = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
+        styles = ET.fromstring(zf.read("xl/styles.xml"))
+    formats = {f.get("numFmtId"): f.get("formatCode") for f in styles.iter(f"{{{NS}}}numFmt")}
+    xfs = [xf.get("numFmtId") for xf in styles.find("m:cellXfs", ns)]
+    cells, cell_format = {}, {}
+    for c in sheet.iter(f"{{{NS}}}c"):
+        ref = c.get("r")
+        node = c.find("m:is/m:t", ns) if c.get("t") == "inlineStr" else c.find("m:v", ns)
+        cells[ref] = node.text or ""
+        cell_format[ref] = formats.get(xfs[int(c.get("s", "0"))], "General")
+    return {
+        "parts": names,
+        "cells": cells,
+        "format": cell_format,
+        "merged": [m.get("ref") for m in sheet.iter(f"{{{NS}}}mergeCell")],
+        "widths": [float(c.get("width")) for c in sheet.iter(f"{{{NS}}}col")],
+        "frozen": sheet.find("m:sheetViews/m:sheetView/m:pane", ns).get("topLeftCell"),
+    }
 
 
 def main() -> None:
@@ -171,18 +234,18 @@ def main() -> None:
         write_csv(records, csv_path)
         write_xlsx(records, xlsx_path, sheet_name="web-01 & db-01")
         back = list(csv.DictReader(io.StringIO(csv_path.read_text(encoding="utf-8"), newline="")))
-        names, sheet, cells = read_xlsx(xlsx_path)
-        is_zip = zipfile.is_zipfile(xlsx_path)
+        book = read_xlsx(xlsx_path)
 
     print(f"csv:  {len(back)} rows, round trip intact: {[r['time'] for r in back] == [r['time'] for r in records]}")
-    print(f"xlsx: zip archive {is_zip}, {len(names)} parts, sheet {sheet!r}")
-    for name in names:
-        print(f"      {name}")
-    last_col = column_letter(len(FIELDS) - 1)
-    print(f"cells read back: {len(cells)} (A1:{last_col}{len(records) + 1})")
-    for r in range(1, 4):
-        print(f"  row {r}: " + " | ".join(cells[f"{column_letter(c)}{r}"] for c in (0, 1, 3, 10)))
-    print("column letters:", ", ".join(f"{i}->{column_letter(i)}" for i in (0, 10, 25, 26, 701, 702)))
+    print(f"xlsx: {len(book['parts'])} parts: {', '.join(book['parts'])}")
+    print("merged header cells:", ", ".join(book["merged"]))
+    print("row 1:", " | ".join(book["cells"][f"{column_letter(c)}1"] or "(blank)" for c in (0, 1, 3, 5, 7)))
+    print("row 2:", " | ".join(book["cells"][f"{column_letter(c)}2"] for c in range(len(FIELDS))))
+    print("column widths:", " ".join(f"{column_letter(i)}={w:g}" for i, w in enumerate(book["widths"])))
+    print("frozen panes, first scrolling cell:", book["frozen"])
+    a3 = book["cells"]["A3"]
+    print(f"A3 stored as {a3} with format {book['format']['A3']!r} -> {from_serial(float(a3))}")
+    print(f"K3 stored as {book['cells']['K3']} with format {book['format']['K3']!r}")
 
 
 if __name__ == "__main__":
@@ -190,14 +253,11 @@ if __name__ == "__main__":
 
 # Output:
 # csv:  5 rows, round trip intact: True
-# xlsx: zip archive True, 5 parts, sheet 'web-01 & db-01'
-#       [Content_Types].xml
-#       _rels/.rels
-#       xl/workbook.xml
-#       xl/_rels/workbook.xml.rels
-#       xl/worksheets/sheet1.xml
-# cells read back: 66 (A1:K6)
-#   row 1: time | run_queue | free_mib | cpu_busy
-#   row 2: 2026-03-14 10:00:05 UTC | 3 | 1759.1 | 39
-#   row 3: 2026-03-14 10:00:10 UTC | 6 | 1681.6 | 73
-# column letters: 0->A, 10->K, 25->Z, 26->AA, 701->ZZ, 702->AAA
+# xlsx: 6 parts: [Content_Types].xml, _rels/.rels, xl/workbook.xml, xl/_rels/workbook.xml.rels, xl/styles.xml, xl/worksheets/sheet1.xml
+# merged header cells: B1:C1, D1:E1, F1:G1, H1:K1
+# row 1: (blank) | procs | memory (MiB) | swap (KiB/s) | cpu (%)
+# row 2: time | run_queue | blocked | free_mib | cache_mib | swap_in | swap_out | cpu_user | cpu_system | cpu_iowait | cpu_busy
+# column widths: A=20 B=11 C=9 D=10 E=11 F=9 G=10 H=10 I=12 J=12 K=10
+# frozen panes, first scrolling cell: A3
+# A3 stored as 46095.41672453703 with format 'yyyy-mm-dd hh:mm:ss' -> 2026-03-14 10:00:05
+# K3 stored as 39 with format 'General'
