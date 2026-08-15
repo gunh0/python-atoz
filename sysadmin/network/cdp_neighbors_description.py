@@ -16,6 +16,8 @@ come and go, and a description should only describe infrastructure links.
 import re
 from dataclasses import dataclass
 
+from _ios import port_sort_key, short_ifname
+
 CDP_DETAIL = """\
 -------------------------
 Device ID: core-sw01.example.net
@@ -72,13 +74,6 @@ Interface: GigabitEthernet1/0/30,  Port ID (outgoing port): GigabitEthernet0
 Holdtime : 98 sec
 """
 
-ABBREVIATIONS = {
-    "TenGigabitEthernet": "Te",
-    "GigabitEthernet": "Gi",
-    "FastEthernet": "Fa",
-    "Ethernet": "Eth",
-}
-
 INFRA_CAPABILITIES = {"Router", "Switch"}
 # Cisco APs advertise "Router Trans-Bridge", phones "Host Phone": not uplinks.
 EDGE_CAPABILITIES = {"Phone", "Trans-Bridge", "Host"}
@@ -91,18 +86,6 @@ class Neighbor:
     capabilities: set[str]
     local_port: str
     remote_port: str
-
-
-def short_ifname(name: str) -> str:
-    for long, short in ABBREVIATIONS.items():
-        if name.startswith(long):
-            return short + name[len(long):]
-    return name
-
-
-def port_sort_key(name: str) -> list[str | int]:
-    """Natural order: Gi1/0/2 before Gi1/0/12."""
-    return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", name)]
 
 
 def hostname(device_id: str) -> str:

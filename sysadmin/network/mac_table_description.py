@@ -19,6 +19,8 @@ exactly one known, non-phone MAC is on an access port.
 import re
 from collections import defaultdict
 
+from _ios import long_ifname
+
 MAC_TABLE = """\
           Mac Address Table
 -------------------------------------------
@@ -54,7 +56,8 @@ mac,hostname,role
 9C:8E:99:C4:0E:21,prn-3f-east,printer
 """
 
-TRUNKS = {"Te1/1/1"}  # from `show interfaces trunk`; never describe these from MACs
+# Copied from the running-config, so long names; the MAC table uses short ones.
+TRUNKS = {"TenGigabitEthernet1/1/1"}  # never describe trunks from MACs
 VOICE_VLANS = {110}
 
 
@@ -93,7 +96,7 @@ def careful(rows, inventory) -> tuple[dict[str, str], dict[str, str]]:
         by_port[port].append((vlan, mac))
     desc, skipped = {}, {}
     for port, entries in by_port.items():
-        if port in TRUNKS:
+        if long_ifname(port) in TRUNKS:
             skipped[port] = f"trunk, {len(entries)} MACs learned"
             continue
         data = [(v, m) for v, m in entries if v not in VOICE_VLANS
@@ -125,7 +128,7 @@ def main() -> None:
     print()
     print("careful join:")
     for port, text in desc.items():
-        print(f"interface {port}\n description {text}")
+        print(f"interface {long_ifname(port)}\n description {text}")
     for port, why in skipped.items():
         print(f"! {port}: skipped, {why}")
 
@@ -144,11 +147,11 @@ if __name__ == "__main__":
 #   Te1/1/1   prn-3f-east
 #
 # careful join:
-# interface Gi1/0/5
+# interface GigabitEthernet1/0/5
 #  description mon01 (server)
-# interface Gi1/0/6
+# interface GigabitEthernet1/0/6
 #  description bk-nas02 (storage)
-# interface Gi1/0/12
+# interface GigabitEthernet1/0/12
 #  description ws-kim-3f (workstation) +phone
 # ! Gi1/0/7: skipped, 0c42.a1b0.0007 not in inventory
 # ! Gi1/0/20: skipped, 3 MACs on data VLANs (hypervisor or hub?)

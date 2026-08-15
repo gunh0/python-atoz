@@ -14,6 +14,8 @@ expect descriptions to round-trip from this output.
 
 from collections import defaultdict
 
+from _ios import is_known, long_ifname, nominal_mbps, short_ifname
+
 STATUS = """\
 Port      Name               Status       Vlan       Duplex  Speed Type
 Gi1/0/1   mon01              connected    10         a-full a-1000 10/100/1000BaseTX
@@ -31,9 +33,6 @@ Twe1/0/1  storage-a ctrl0    connected    30           full    25G SFP-25GBase-S
 Po1       to core            connected    trunk      a-full  a-10G
 """
 
-# Nominal speed in Mbit/s by interface name prefix.
-NOMINAL_MBPS = {"Gi": 1000, "Te": 10000, "Po": None}
-LONG_NAMES = {"Gi": "GigabitEthernet", "Te": "TenGigabitEthernet", "Po": "Port-channel"}
 
 
 def column_slices(header: str) -> dict[str, slice]:
@@ -57,13 +56,8 @@ def parse_status(text: str) -> list[dict[str, str]]:
     return out
 
 
-def prefix(port: str) -> str:
-    return port.rstrip("0123456789/.").rstrip()
-
-
 def classify(p: dict[str, str]) -> str:
-    kind = prefix(p["Port"])
-    if kind not in NOMINAL_MBPS:
+    if not is_known(p["Port"]):
         return "unknown type"
     if p["Status"] == "err-disabled":
         return "err-disabled"
@@ -71,13 +65,13 @@ def classify(p: dict[str, str]) -> str:
         return "admin down"
     if p["Type"] == "Not Present":
         return "empty optic slot"
-    if kind == "Po":
+    if short_ifname(p["Port"]).startswith("Po"):
         return "port-channel"
     if p["Vlan"] == "trunk":
         return "trunk"
     if p["Status"] == "notconnect":
         return "access unused"
-    nominal = NOMINAL_MBPS[kind]
+    nominal = nominal_mbps(p["Port"])
     speed = p["Speed"].removeprefix("a-")
     mbps = int(speed[:-1]) * 1000 if speed.endswith("G") else int(speed) if speed.isdigit() else None
     if "half" in p["Duplex"] or (mbps and nominal and mbps < nominal):
@@ -104,8 +98,7 @@ def main() -> None:
     print()
     print("! proposed cleanup for unused access ports")
     for port in buckets["access unused"]:
-        kind = prefix(port)
-        print(f"interface {LONG_NAMES[kind]}{port[len(kind):]}\n description UNUSED\n shutdown")
+        print(f"interface {long_ifname(port)}\n description UNUSED\n shutdown")
 
 
 if __name__ == "__main__":
@@ -116,14 +109,13 @@ if __name__ == "__main__":
 # offset parse of Gi1/0/3: status='disabled' vlan='20'
 #
 # access degraded link   1  Gi1/0/13
-# access in use          2  Gi1/0/1 Gi1/0/12
+# access in use          3  Gi1/0/1 Gi1/0/12 Twe1/0/1
 # access unused          2  Gi1/0/2 Gi1/0/4
 # admin down             1  Gi1/0/3
 # empty optic slot       1  Te1/1/3
 # err-disabled           1  Gi1/0/47
 # port-channel           1  Po1
 # trunk                  3  Gi1/0/24 Te1/1/1 Te1/1/2
-# unknown type           1  Twe1/0/1
 # check cable: Gi1/0/13 (lab-pc-07) at a-half a-100
 #
 # ! proposed cleanup for unused access ports
