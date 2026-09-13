@@ -1,4 +1,4 @@
-"""MegaCLI RAID report v2: virtual drives, physical disk errors and rebuilds
+"""MegaCLI RAID report v3: multiple adapters and a Nagios-style result
 
 LSI/Broadcom MegaRAID controllers are still everywhere in older racks, and the
 only interface many of them have is MegaCli64, whose output is a loose list of
@@ -16,6 +16,13 @@ is: a RAID-5 that is rebuilding onto a fresh disk while another member keeps
 growing Media Error / Predictive Failure counts is one bad sector away from
 losing the array. Media errors are the disk; Other Error Count is usually the
 path (cable, backplane, expander) and is reported separately.
+
+v3 runs on hosts with two controllers. VD and disk-group numbers restart at
+0 on every adapter, and v2 matched "is this disk in a problem VD?" on the
+number alone, so a failing disk in a0/dg0 was hidden as soon as a1/v0 was
+degraded. Everything is now keyed by (adapter, number). The result ends in
+one Nagios-style line plus exit code (0 ok, 1 warning, 2 critical) with
+perfdata, so the same script can be a monitoring check.
 """
 
 from dataclasses import dataclass
@@ -60,6 +67,20 @@ Default Cache Policy: WriteBack, ReadAhead, Direct, No Write Cache if Bad BBU
 Current Cache Policy: WriteBack, ReadAhead, Direct, No Write Cache if Bad BBU
 Disk Cache Policy   : Disk's Default
 
+Adapter 1 -- Virtual Drive Information:
+Virtual Drive: 0 (Target Id: 0)
+Name                :archive
+RAID Level          : Primary-6, Secondary-0, RAID Level Qualifier-3
+Size                : 7.276 TB
+Sector Size         : 512
+State               : Partially Degraded
+Strip Size          : 256 KB
+Number Of Drives    : 6
+Span Depth          : 1
+Default Cache Policy: WriteBack, ReadAhead, Direct, No Write Cache if Bad BBU
+Current Cache Policy: WriteBack, ReadAhead, Direct, No Write Cache if Bad BBU
+Disk Cache Policy   : Disabled
+
 Exit Code: 0x00
 """
 
@@ -79,7 +100,7 @@ Inquiry Data: SEAGATE ST300MM0048     N004S0K2B1QX
 Enclosure Device ID: 32
 Slot Number: 1
 Drive's position: DiskGroup: 0, Span: 0, Arm: 1
-Media Error Count: 0
+Media Error Count: 2
 Other Error Count: 0
 Predictive Failure Count: 0
 Raw Size: 279.396 GB [0x22ecb25c Sectors]
@@ -158,16 +179,73 @@ Raw Size: 931.512 GB [0x74706db0 Sectors]
 Firmware state: Online, Spun Up
 Inquiry Data: SEAGATE ST1000NX0423    SN04W1T7L1ZC
 
+Adapter #1
+
+Enclosure Device ID: 252
+Slot Number: 0
+Drive's position: DiskGroup: 0, Span: 0, Arm: 0
+Media Error Count: 0
+Other Error Count: 0
+Predictive Failure Count: 0
+Raw Size: 1.819 TB [0xe8e088b0 Sectors]
+Firmware state: Online, Spun Up
+Inquiry Data: SEAGATE ST2000NM0055    SN05ZD70A2QX
+Enclosure Device ID: 252
+Slot Number: 1
+Drive's position: DiskGroup: 0, Span: 0, Arm: 1
+Media Error Count: 0
+Other Error Count: 0
+Predictive Failure Count: 0
+Raw Size: 1.819 TB [0xe8e088b0 Sectors]
+Firmware state: Online, Spun Up
+Inquiry Data: SEAGATE ST2000NM0055    SN05ZD71A2QX
+Enclosure Device ID: 252
+Slot Number: 2
+Drive's position: DiskGroup: 0, Span: 0, Arm: 2
+Media Error Count: 0
+Other Error Count: 0
+Predictive Failure Count: 0
+Raw Size: 1.819 TB [0xe8e088b0 Sectors]
+Firmware state: Online, Spun Up
+Inquiry Data: SEAGATE ST2000NM0055    SN05ZD72A2QX
+Enclosure Device ID: 252
+Slot Number: 3
+Drive's position: DiskGroup: 0, Span: 0, Arm: 3
+Media Error Count: 0
+Other Error Count: 0
+Predictive Failure Count: 0
+Raw Size: 1.819 TB [0xe8e088b0 Sectors]
+Firmware state: Online, Spun Up
+Inquiry Data: SEAGATE ST2000NM0055    SN05ZD73A2QX
+Enclosure Device ID: 252
+Slot Number: 4
+Drive's position: DiskGroup: 0, Span: 0, Arm: 4
+Media Error Count: 0
+Other Error Count: 0
+Predictive Failure Count: 0
+Raw Size: 1.819 TB [0xe8e088b0 Sectors]
+Firmware state: Failed
+Inquiry Data: SEAGATE ST2000NM0055    SN05ZD74A2QX
+Enclosure Device ID: 252
+Slot Number: 5
+Drive's position: DiskGroup: 0, Span: 0, Arm: 5
+Media Error Count: 0
+Other Error Count: 0
+Predictive Failure Count: 0
+Raw Size: 1.819 TB [0xe8e088b0 Sectors]
+Firmware state: Online, Spun Up
+Inquiry Data: SEAGATE ST2000NM0055    SN05ZD75A2QX
+
 Exit Code: 0x00
 """
 
-# `MegaCli64 -PDRbld -ShowProg -PhysDrv [32:2] -a0`
-REBUILD_PROGRESS = """\
+# `MegaCli64 -PDRbld -ShowProg -PhysDrv [32:2] -a0`, per adapter
+REBUILD_PROGRESS = {0: """\
 
 Rebuild Progress on Device at Enclosure 32, Slot 2 Completed 47% in 38 Minutes.
 
 Exit Code: 0x00
-"""
+"""}
 
 
 @dataclass
@@ -199,6 +277,10 @@ class PhysicalDrive:
     @property
     def slot(self) -> str:
         return f"{self.fields['enclosure_device_id']}:{self.fields['slot_number']}"
+
+    @property
+    def where(self) -> str:
+        return f"a{self.adapter}:{self.slot}"
 
     @property
     def disk_group(self) -> int:
@@ -281,7 +363,8 @@ def disk_findings(pd: PhysicalDrive) -> list[str]:
 def main() -> None:
     drives = parse_ldinfo(LDINFO)
     disks = parse_pdlist(PDLIST)
-    rebuilds = parse_rebuild(REBUILD_PROGRESS)
+    rebuilds = {(adapter, slot): progress for adapter, text in REBUILD_PROGRESS.items()
+                for slot, progress in parse_rebuild(text).items()}
     print(f"{'VD':<7} {'name':<8} {'level':<8} {'size':>10}  state")
     for vd in drives:
         name = vd.fields.get("name", "")
@@ -289,13 +372,14 @@ def main() -> None:
         print(f"a{vd.adapter}/v{vd.number:<3} {name:<8} {vd.raid_level:<8} {size:>10}  {vd.state}")
 
     print()
-    print(f"{'slot':<6} {'dg':>2}  {'state':<8} {'media':>5} {'other':>5} {'pred':>4}  model")
+    print(f"{'disk':<10} {'dg':>2}  {'state':<8} {'media':>5} {'other':>5} {'pred':>4}")
     for pd in disks:
-        model = " ".join(pd.fields["inquiry_data"].split()[:2])
-        print(f"{pd.slot:<6} {pd.disk_group:>2}  {pd.state:<8} {pd.count('media_error_count'):>5} "
-              f"{pd.count('other_error_count'):>5} {pd.count('predictive_failure_count'):>4}  {model}")
+        print(f"{pd.where:<10} {pd.disk_group:>2}  {pd.state:<8} {pd.count('media_error_count'):>5} "
+              f"{pd.count('other_error_count'):>5} {pd.count('predictive_failure_count'):>4}")
 
     problems = [vd for vd in drives if vd.state != "Optimal"]
+    problem_keys = {(vd.adapter, vd.number) for vd in problems}
+    summary, worst = [], 0
     print()
     for vd in problems:
         cache = vd.fields.get("current_cache_policy", "").split(",")[0]
@@ -303,28 +387,42 @@ def main() -> None:
               f"current cache={cache}")
         # DiskGroup equals the VD number when each group carries one VD, as here;
         # `-LdPdInfo` is the authoritative mapping when groups are shared.
-        members = [pd for pd in disks if pd.adapter == vd.adapter and pd.disk_group == vd.number]
+        members = [pd for pd in disks if (pd.adapter, pd.disk_group) == (vd.adapter, vd.number)]
+        detail = vd.state
         for pd in members:
             notes = disk_findings(pd)
-            if pd.slot in rebuilds:
-                percent, minutes = rebuilds[pd.slot]
+            if (pd.adapter, pd.slot) in rebuilds:
+                percent, minutes = rebuilds[(pd.adapter, pd.slot)]
                 eta = round(minutes * (100 - percent) / percent)
                 notes.append(f"rebuild {percent}% after {minutes} min, ~{eta} min left")
+                detail += f", rebuild {percent}%"
             if notes:
-                print(f"  disk {pd.slot}: " + "; ".join(notes))
+                print(f"  disk {pd.where}: " + "; ".join(notes))
         rebuilding = any(pd.state == "Rebuild" for pd in members)
-        at_risk = [pd.slot for pd in members if pd.state == "Online" and
+        at_risk = [pd.where for pd in members if pd.state == "Online" and
                    (pd.count("media_error_count") or pd.count("predictive_failure_count"))]
         if rebuilding and at_risk and vd.raid_level == "RAID-5":
             print(f"  RISK: RAID-5 rebuild depends on {', '.join(at_risk)}, which is already failing;"
                   " verify backups before anything else")
+            detail += ", second disk failing"
+        # RAID-6 with one disk gone still has redundancy: warning, not critical.
+        severity = 1 if vd.state == "Partially Degraded" else 2
+        worst = max(worst, severity)
+        summary.append(f"a{vd.adapter}/v{vd.number} {detail}")
 
     # Disks outside a problem VD still deserve a ticket.
-    quiet = [pd for pd in disks if disk_findings(pd)
-             and not any(vd.number == pd.disk_group for vd in problems)]
-    for pd in quiet:
-        print(f"NOTICE disk {pd.slot} (dg {pd.disk_group}): " + "; ".join(disk_findings(pd)))
-    print(f"{len(drives)} virtual drives, {len(problems)} not optimal, {len(disks)} disks")
+    for pd in disks:
+        if disk_findings(pd) and (pd.adapter, pd.disk_group) not in problem_keys:
+            print(f"NOTICE disk {pd.where} (dg {pd.disk_group}): " + "; ".join(disk_findings(pd)))
+            worst = max(worst, 1)
+            summary.append(f"{pd.where} " + disk_findings(pd)[0])
+
+    media = sum(pd.count("media_error_count") for pd in disks)
+    label = ("OK", "WARNING", "CRITICAL")[worst]
+    print()
+    print(f"RAID {label} - {'; '.join(summary) or 'all optimal'} | vd_total={len(drives)} "
+          f"vd_bad={len(problems)} disks={len(disks)} media_errors={media}")
+    print(f"exit {worst}")  # as a monitoring check: sys.exit(worst)
 
 
 if __name__ == "__main__":
@@ -335,23 +433,35 @@ if __name__ == "__main__":
 # a0/v0   os       RAID-1   278.875 GB  Optimal
 # a0/v1   data     RAID-5     5.457 TB  Degraded
 # a0/v2   db       RAID-10    1.817 TB  Optimal
+# a1/v0   archive  RAID-6     7.276 TB  Partially Degraded
 #
-# slot   dg  state    media other pred  model
-# 32:0    0  Online       0     0    0  SEAGATE ST300MM0048
-# 32:1    0  Online       0     0    0  SEAGATE ST300MM0048
-# 32:2    1  Rebuild      0     0    0  SEAGATE ST2000NM0055
-# 32:3    1  Online      14     0    1  SEAGATE ST2000NM0055
-# 32:4    1  Online       0     3    0  SEAGATE ST2000NM0055
-# 32:5    1  Online       0     0    0  SEAGATE ST2000NM0055
-# 32:6    2  Online       0     0    0  SEAGATE ST1000NX0423
-# 32:7    2  Online       0     1    0  SEAGATE ST1000NX0423
-# 32:8    2  Online       0     0    0  SEAGATE ST1000NX0423
-# 32:9    2  Online       0     0    0  SEAGATE ST1000NX0423
+# disk       dg  state    media other pred
+# a0:32:0     0  Online       0     0    0
+# a0:32:1     0  Online       2     0    0
+# a0:32:2     1  Rebuild      0     0    0
+# a0:32:3     1  Online      14     0    1
+# a0:32:4     1  Online       0     3    0
+# a0:32:5     1  Online       0     0    0
+# a0:32:6     2  Online       0     0    0
+# a0:32:7     2  Online       0     1    0
+# a0:32:8     2  Online       0     0    0
+# a0:32:9     2  Online       0     0    0
+# a1:252:0    0  Online       0     0    0
+# a1:252:1    0  Online       0     0    0
+# a1:252:2    0  Online       0     0    0
+# a1:252:3    0  Online       0     0    0
+# a1:252:4    0  Failed       0     0    0
+# a1:252:5    0  Online       0     0    0
 #
 # PROBLEM a0/v1 (data): state=Degraded, current cache=WriteThrough
-#   disk 32:2: state Rebuild; rebuild 47% after 38 min, ~43 min left
-#   disk 32:3: 14 media errors; predictive failure (SMART trip)
-#   disk 32:4: 3 other errors (check cable/backplane)
-#   RISK: RAID-5 rebuild depends on 32:3, which is already failing; verify backups before anything else
-# NOTICE disk 32:7 (dg 2): 1 other errors (check cable/backplane)
-# 3 virtual drives, 1 not optimal, 10 disks
+#   disk a0:32:2: state Rebuild; rebuild 47% after 38 min, ~43 min left
+#   disk a0:32:3: 14 media errors; predictive failure (SMART trip)
+#   disk a0:32:4: 3 other errors (check cable/backplane)
+#   RISK: RAID-5 rebuild depends on a0:32:3, which is already failing; verify backups before anything else
+# PROBLEM a1/v0 (archive): state=Partially Degraded, current cache=WriteBack
+#   disk a1:252:4: state Failed
+# NOTICE disk a0:32:1 (dg 0): 2 media errors
+# NOTICE disk a0:32:7 (dg 2): 1 other errors (check cable/backplane)
+#
+# RAID CRITICAL - a0/v1 Degraded, rebuild 47%, second disk failing; a1/v0 Partially Degraded; a0:32:1 2 media errors; a0:32:7 1 other errors (check cable/backplane) | vd_total=4 vd_bad=2 disks=16 media_errors=16
+# exit 2
