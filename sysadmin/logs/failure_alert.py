@@ -1,19 +1,21 @@
-"""failure_alert v1 — alert on N failed logins from one source within M minutes
+"""failure_alert v2 — timely "clear", cooldown, and success-after-failures
 
-A single "Failed password" line is noise; the internet does that to every
-SSH server all day. Five from one address in ten minutes is a brute-force
-attempt worth an alert (and the rule fail2ban implements). Counting per
-day or per file gets it wrong in both directions, so the rule here is a
-sliding window: for each source keep the timestamps of its recent
-failures in a deque, drop the ones older than M minutes, alert when N
-remain.
+v1 counted failed logins per source in a sliding window. Running it for a
+month showed three things to fix:
 
-Timestamps come from the log lines, not the clock, so the same file gives
-the same alerts whether it is processed live or replayed a week later.
-v1 alerts once when a source crosses the threshold and stays quiet until
-its window drains below it again, so a 200-attempt burst is one alert,
-not 196. Known gap: the window is only re-checked when the same source
-fails again, so "clear" shows up late (see 203.0.113.50 below).
+- "clear" arrived late, because a source's window was only re-checked when
+  that source failed again. v2 advances time on every log line and computes
+  the exact moment the window dropped below the threshold: the time the
+  oldest of the last N failures expired.
+- An attacker who pauses and comes back pages on-call again. v2 keeps a
+  per-source cooldown (2 h here): a repeat burst inside it is logged as
+  "repeat" with a lower severity instead of a new page.
+- The event that matters most was not detected at all: a successful login
+  from a source that was failing a moment ago. "Accepted ... from <ip>"
+  while that ip has failures in its window is CRIT: possible compromise.
+
+Events are still derived only from log timestamps, so replaying a file is
+exact.
 """
 
 import datetime as dt
@@ -54,31 +56,80 @@ MONTHS = {m: i for i, m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct No
 FAILED = re.compile(
     r"^(?P<mon>\w{3}) +(?P<day>\d+) (?P<time>[\d:]{8}) \S+ sshd\[\d+\]: "
     r"Failed password for (?:invalid user )?(?P<user>\S+) from (?P<ip>[\d.]+) ")
+ACCEPTED = re.compile(
+    r"^(?P<mon>\w{3}) +(?P<day>\d+) (?P<time>[\d:]{8}) \S+ sshd\[\d+\]: "
+    r"Accepted (?P<method>\S+) for (?P<user>\S+) from (?P<ip>[\d.]+) ")
+
+
+def stamp(m: re.Match) -> dt.datetime:
+    hh, mm, ss = map(int, m["time"].split(":"))
+    return dt.datetime(YEAR, MONTHS[m["mon"]], int(m["day"]), hh, mm, ss)
+
+
+def events(lines):
+    """Yield (time, kind, ip, user) for failed and accepted logins."""
+    for line in lines:
+        if m := FAILED.match(line):
+            yield stamp(m), "failed", m["ip"], m["user"]
+        elif m := ACCEPTED.match(line):
+            yield stamp(m), "accepted", m["ip"], m["user"]
 
 
 def failures(lines):
-    for line in lines:
-        if m := FAILED.match(line):
-            hh, mm, ss = map(int, m["time"].split(":"))
-            ts = dt.datetime(YEAR, MONTHS[m["mon"]], int(m["day"]), hh, mm, ss)
-            yield ts, m["ip"], m["user"]
+    for ts, kind, ip, user in events(lines):
+        if kind == "failed":
+            yield ts, ip, user
 
 
-def detect(lines, threshold: int = 5, window: dt.timedelta = dt.timedelta(minutes=10)):
-    recent: dict[str, deque] = defaultdict(deque)
-    alerting: set[str] = set()
-    for ts, ip, user in failures(lines):
-        q = recent[ip]
-        q.append(ts)
-        while q and ts - q[0] > window:
+class Detector:
+    def __init__(self, threshold=5, window=dt.timedelta(minutes=10), cooldown=dt.timedelta(hours=2)):
+        self.threshold, self.window, self.cooldown = threshold, window, cooldown
+        self.recent: dict[str, deque] = defaultdict(deque)
+        self.alerting: set[str] = set()
+        self.last_alert: dict[str, dt.datetime] = {}
+
+    def _expire(self, now: dt.datetime):
+        """Emit 'clear' for every alerting source whose window drained by `now`."""
+        for ip in sorted(self.alerting):
+            q = self.recent[ip]
+            clear_at = q[-self.threshold] + self.window
+            if clear_at <= now:
+                self.alerting.discard(ip)
+                yield clear_at, "info", ip, f"clear, under {self.threshold} failures per {self.window.seconds // 60} min"
+
+    def feed(self, ts: dt.datetime, kind: str, ip: str, user: str):
+        out = list(self._expire(ts))
+        q = self.recent[ip]
+        while q and ts - q[0] > self.window:
             q.popleft()
-        if len(q) >= threshold and ip not in alerting:
-            alerting.add(ip)
-            span = (q[-1] - q[0]).total_seconds()
-            yield f"{ts:%H:%M:%S} ALERT {ip}: {len(q)} failures in {span:.0f}s (last user {user})"
-        elif len(q) < threshold and ip in alerting:
-            alerting.discard(ip)
-            yield f"{ts:%H:%M:%S} clear {ip}: back under {threshold} in {window.seconds // 60} min"
+        if kind == "accepted":
+            if q:
+                out.append((ts, "CRIT", ip, f"login as {user} succeeded after {len(q)} failure(s) "
+                                            f"in {self.window.seconds // 60} min: possible compromise"))
+            return out
+        q.append(ts)
+        if len(q) >= self.threshold and ip not in self.alerting:
+            self.alerting.add(ip)
+            last = self.last_alert.get(ip)
+            if last is not None and ts - last < self.cooldown:
+                out.append((ts, "warn", ip, f"repeat burst, {len(q)} failures (within cooldown, no page)"))
+            else:
+                self.last_alert[ip] = ts
+                out.append((ts, "PAGE", ip, f"{len(q)} failures in {(q[-1] - q[0]).seconds}s, last user {user}"))
+        return out
+
+    def finish(self, now: dt.datetime):
+        return list(self._expire(now))
+
+
+def detect(lines, **rules):
+    det = Detector(**rules)
+    last = None
+    for ts, kind, ip, user in events(lines):
+        yield from det.feed(ts, kind, ip, user)
+        last = ts
+    if last is not None:
+        yield from det.finish(last + det.window)  # let open windows drain after the log ends
 
 
 def main() -> None:
@@ -88,13 +139,14 @@ def main() -> None:
         total[ip] += 1
     print("failures per source:", ", ".join(f"{ip}={n}" for ip, n in sorted(total.items())))
     print()
-    print("rule: 5 failures in 10 minutes")
-    for event in detect(lines):
-        print(" ", event)
+    print("rule: 5 failures in 10 minutes, 2 h cooldown")
+    for ts, level, ip, text in detect(lines):
+        print(f"  {ts:%H:%M:%S} {level:<4} {ip:<13} {text}")
     print()
-    print("rule: 3 failures in 20 minutes (catches the slow one too)")
-    for event in detect(lines, threshold=3, window=dt.timedelta(minutes=20)):
-        print(" ", event)
+    print("rule: 5 failures in 10 minutes, 30 min cooldown")
+    for ts, level, ip, text in detect(lines, cooldown=dt.timedelta(minutes=30)):
+        if level in ("PAGE", "warn"):
+            print(f"  {ts:%H:%M:%S} {level:<4} {ip:<13} {text}")
 
 
 if __name__ == "__main__":
@@ -103,15 +155,16 @@ if __name__ == "__main__":
 # Output:
 # failures per source: 192.0.2.14=5, 198.51.100.7=6, 203.0.113.50=13
 #
-# rule: 5 failures in 10 minutes
-#   03:10:16 ALERT 203.0.113.50: 5 failures in 14s (last user test)
-#   04:09:55 ALERT 192.0.2.14: 5 failures in 464s (last user admin)
-#   04:31:00 clear 203.0.113.50: back under 5 in 10 min
-#   04:31:15 ALERT 203.0.113.50: 5 failures in 15s (last user root)
+# rule: 5 failures in 10 minutes, 2 h cooldown
+#   03:10:16 PAGE 203.0.113.50  5 failures in 14s, last user test
+#   03:20:12 info 203.0.113.50  clear, under 5 failures per 10 min
+#   04:09:55 PAGE 192.0.2.14    5 failures in 464s, last user admin
+#   04:10:31 CRIT 192.0.2.14    login as admin succeeded after 5 failure(s) in 10 min: possible compromise
+#   04:12:11 info 192.0.2.14    clear, under 5 failures per 10 min
+#   04:31:15 warn 203.0.113.50  repeat burst, 5 failures (within cooldown, no page)
+#   04:41:00 info 203.0.113.50  clear, under 5 failures per 10 min
 #
-# rule: 3 failures in 20 minutes (catches the slow one too)
-#   03:10:09 ALERT 203.0.113.50: 3 failures in 7s (last user oracle)
-#   03:29:44 ALERT 198.51.100.7: 3 failures in 1024s (last user deploy)
-#   04:05:02 ALERT 192.0.2.14: 3 failures in 171s (last user admin)
-#   04:31:00 clear 203.0.113.50: back under 3 in 20 min
-#   04:31:07 ALERT 203.0.113.50: 3 failures in 7s (last user root)
+# rule: 5 failures in 10 minutes, 30 min cooldown
+#   03:10:16 PAGE 203.0.113.50  5 failures in 14s, last user test
+#   04:09:55 PAGE 192.0.2.14    5 failures in 464s, last user admin
+#   04:31:15 PAGE 203.0.113.50  5 failures in 15s, last user root
