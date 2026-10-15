@@ -1,25 +1,25 @@
-"""Slopsquatting — the package a snippet imports may not exist (yet)
+"""Slopsquatting v2 — check the declared dependencies, not only the imports
 
-https://en.wikipedia.org/wiki/Slopsquatting
+https://packaging.python.org/en/latest/specifications/name-normalization/
 
-Copied snippets import plausible packages that do not exist on the index:
-`flask_auth_tokens_simple`, `colourama`, `fastjsonschema_validator` — typos,
-or made-up names copied from snippet to snippet. The same names keep coming
-back, so attackers register them on PyPI with a malicious install script and
-wait. A developer pastes the code, runs `pip install` for whatever is
-missing, and the attacker's code runs.
+v1 checked what the snippet imports. The install step reads the
+dependency files that came with it, and that is where a nonexistent
+name actually gets fetched. v2 parses `requirements.txt` and the
+`[project]` table of `pyproject.toml` (with `tomllib`), strips versions,
+extras and environment markers, normalises names the way the index does
+(`Python_DateUtil` == `python-dateutil`), and runs the same verdicts.
 
-Before installing anything from a snippet: list what it imports, drop
-stdlib and local modules, map import names to distribution names (`yaml` is
-PyYAML, `bs4` is beautifulsoup4), and check every name against the index.
-Unknown names and look-alikes of popular packages are flagged; a name that
-does exist but appeared only weeks ago deserves a second look too. The index
-here is a small self-written fixture standing in for PyPI metadata.
+Two more findings come out of having both sides: a direct URL / VCS
+requirement skips the index entirely (and every check here), and an import
+with no matching declared dependency means someone will `pip install` it by
+hand later — the exact moment a squatted name gets installed.
 """
 
 import ast
 import difflib
+import re
 import sys
+import tomllib
 from datetime import date
 
 # name -> (first release, downloads last month); fixture data, not real statistics.
@@ -33,6 +33,7 @@ INDEX = {
     "flask": (date(2010, 4, 6), 90_000_000),
     "flask-jwt-extended": (date(2015, 10, 1), 6_000_000),
     "numpy": (date(2006, 12, 2), 300_000_000),
+    "pytest": (date(2010, 11, 1), 250_000_000),
     "fastjsonschema-validator": (date(2026, 9, 12), 41),  # registered after the name started circulating
 }
 IMPORT_TO_DIST = {
@@ -42,7 +43,7 @@ IMPORT_TO_DIST = {
     "dateutil": "python-dateutil",
 }
 REVIEW_DATE = date(2026, 10, 1)
-FLAGGED = {"MISSING", "LOOK-ALIKE", "SUSPICIOUS"}
+FLAGGED = {"MISSING", "LOOK-ALIKE", "SUSPICIOUS", "DIRECT-URL"}
 POPULAR = [name for name, (_, downloads) in INDEX.items() if downloads >= 1_000_000]
 
 # Sample code under review: a script that syncs tickets to a dashboard.
@@ -63,6 +64,68 @@ from sklearn.cluster import KMeans
 from . import settings
 '''
 
+REQUIREMENTS_TXT = '''\
+# shipped alongside the script
+requests>=2.31
+PyYAML==6.0.1
+Python_DateUtil~=2.9          # odd spelling, same project
+colourama==0.4.6
+fastjsonschema-validator
+scikit-learn; python_version >= "3.10"
+flask-auth-tokens-simple @ git+https://github.com/example/flask-auth-tokens.git
+-r dev-requirements.txt
+'''
+
+PYPROJECT_TOML = '''\
+[project]
+name = "ticket-sync"
+version = "0.1.0"
+dependencies = ["requests>=2.31", "Flask-JWT-Extended[asymmetric_crypto]>=4", "numpyy>=1.26"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+'''
+
+NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def normalize(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def parse_requirement(line: str) -> tuple[str, bool] | None:
+    """Return (normalised name, is_direct_url) or None for comments and options."""
+    line = re.sub(r"(^|\s)#.*$", "", line).strip()  # pip: '#' after whitespace starts a comment
+    if not line or line.startswith("-"):
+        return None
+    match = NAME.match(line)
+    if not match:
+        return None
+    return normalize(match.group(1)), " @ " in line or "://" in line
+
+
+def requirements_txt(text: str) -> list[tuple[str, str, bool]]:
+    found = []
+    for n, line in enumerate(text.splitlines(), 1):
+        parsed = parse_requirement(line)
+        if parsed:
+            found.append((f"requirements.txt:{n}", *parsed))
+    return found
+
+
+def pyproject(text: str) -> list[tuple[str, str, bool]]:
+    project = tomllib.loads(text).get("project", {})
+    groups = {"dependencies": project.get("dependencies", [])}
+    for extra, deps in project.get("optional-dependencies", {}).items():
+        groups[f"optional.{extra}"] = deps
+    found = []
+    for group, deps in groups.items():
+        for dep in deps:
+            parsed = parse_requirement(dep)
+            if parsed:
+                found.append((f"pyproject {group}", *parsed))
+    return found
+
 
 def imported_top_level(source: str) -> list[tuple[int, str]]:
     found = []
@@ -74,10 +137,15 @@ def imported_top_level(source: str) -> list[tuple[int, str]]:
     return sorted(found)
 
 
-def assess(module: str) -> tuple[str, str]:
+def dist_for_import(module: str) -> str | None:
     if module in sys.stdlib_module_names:
-        return "stdlib", ""
-    dist = IMPORT_TO_DIST.get(module, module.lower().replace("_", "-"))
+        return None
+    return IMPORT_TO_DIST.get(module, normalize(module))
+
+
+def assess(dist: str, direct_url: bool = False) -> tuple[str, str]:
+    if direct_url:
+        return "DIRECT-URL", f"{dist} is fetched from a URL, bypassing the index and these checks"
     if dist in INDEX:
         first, downloads = INDEX[dist]
         age = (REVIEW_DATE - first).days
@@ -91,31 +159,46 @@ def assess(module: str) -> tuple[str, str]:
 
 
 def main() -> None:
-    imports = imported_top_level(SNIPPET)
-    print(f"{len(imports)} absolute imports in the snippet "
-          f"(relative 'from . import' skipped)")
+    declared = requirements_txt(REQUIREMENTS_TXT) + pyproject(PYPROJECT_TOML)
     flagged = 0
-    for line, module in imports:
-        verdict, detail = assess(module)
+    print(f"{len(declared)} declared dependencies")
+    for where, dist, direct in declared:
+        verdict, detail = assess(dist, direct)
         flagged += verdict in FLAGGED
-        print(f"  line {line:>2}  {module:<25} {verdict:<11} {detail}")
-    print(f"{flagged} of {len(imports)} imports need a human before anything is installed")
+        print(f"  {where:<27} {verdict:<11} {detail}")
+    print(f"{flagged} of {len(declared)} need a human before `pip install`")
+    print()
+
+    names = {dist for _, dist, _ in declared}
+    undeclared = []
+    for line, module in imported_top_level(SNIPPET):
+        dist = dist_for_import(module)
+        if dist and dist not in names:
+            undeclared.append(f"{module} (line {line}, expects {dist})")
+    print(f"imported but not declared: {undeclared or 'none'}")
+    imported = {dist_for_import(m) for _, m in imported_top_level(SNIPPET)}
+    runtime = {dist for where, dist, _ in declared if "optional" not in where}
+    unused = sorted(runtime - imported)
+    print(f"declared but never imported: {unused}")
 
 
 if __name__ == "__main__":
     main()
 
 # Output:
-# 11 absolute imports in the snippet (relative 'from . import' skipped)
-#   line  1  json                      stdlib
-#   line  2  os                        stdlib
-#   line  3  pathlib                   stdlib
-#   line  5  requests                  ok          requests
-#   line  6  yaml                      ok          pyyaml
-#   line  7  bs4                       ok          beautifulsoup4
-#   line  8  dateutil                  ok          python-dateutil
-#   line  9  colourama                 LOOK-ALIKE  colourama is not on the index; did you mean colorama?
-#   line 10  flask_auth_tokens_simple  MISSING     flask-auth-tokens-simple is not on the index: anyone can register it, do not pip install
-#   line 11  fastjsonschema_validator  SUSPICIOUS  fastjsonschema-validator exists but is 19 days old with 41 downloads
-#   line 12  sklearn                   ok          scikit-learn
-# 3 of 11 imports need a human before anything is installed
+# 11 declared dependencies
+#   requirements.txt:2          ok          requests
+#   requirements.txt:3          ok          pyyaml
+#   requirements.txt:4          ok          python-dateutil
+#   requirements.txt:5          LOOK-ALIKE  colourama is not on the index; did you mean colorama?
+#   requirements.txt:6          SUSPICIOUS  fastjsonschema-validator exists but is 19 days old with 41 downloads
+#   requirements.txt:7          ok          scikit-learn
+#   requirements.txt:8          DIRECT-URL  flask-auth-tokens-simple is fetched from a URL, bypassing the index and these checks
+#   pyproject dependencies      ok          requests
+#   pyproject dependencies      ok          flask-jwt-extended
+#   pyproject dependencies      LOOK-ALIKE  numpyy is not on the index; did you mean numpy?
+#   pyproject optional.dev      ok          pytest
+# 4 of 11 need a human before `pip install`
+#
+# imported but not declared: ['bs4 (line 7, expects beautifulsoup4)']
+# declared but never imported: ['flask-jwt-extended', 'numpyy']
