@@ -44,7 +44,8 @@ def main() -> None:
     try:
         Decimal("1.10") + 0.2
     except TypeError as exc:
-        print("Decimal + float ->", type(exc).__name__ + ":", exc)
+        # The message names the type differently in the C and pure-Python decimal modules.
+        print("Decimal + float ->", type(exc).__name__, "(no implicit mixing)")
 
     # Trap silent float -> Decimal conversions in money code paths.
     with decimal.localcontext() as ctx:
@@ -72,7 +73,7 @@ if __name__ == "__main__":
 # Decimal(str(0.1)) = 0.1 (works, but the float was still parsed first)
 # noncompliant: balance = -2.775557561565156540423631668E-17
 # compliant:    balance = 0.00
-# Decimal + float -> TypeError: unsupported operand type(s) for +: 'decimal.Decimal' and 'float'
+# Decimal + float -> TypeError (no implicit mixing)
 # FloatOperation trapped: Decimal(19.99) rejected inside money context
 # Decimal('19.99') still fine: 19.99
 # split 100.00 three ways: ['33.34', '33.33', '33.33'] sum = 100.00
