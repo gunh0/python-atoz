@@ -9,7 +9,7 @@ python3 sysadmin/<topic>/<example>.py      # every example runs on its own
 python3 scripts/check.py sysadmin          # run all and compare with the # Output: blocks
 ```
 
-32 examples, checked on Python 3.13, Python 3.14.
+39 examples, checked on Python 3.13, Python 3.14, Python 3.15.
 
 ## host
 
@@ -22,7 +22,7 @@ Collecting host facts and parsing `/proc/meminfo`, `df`, `vmstat` and `iostat` i
 | [`meminfo_parse.py`](host/meminfo_parse.py) | Parsing /proc/meminfo — use MemAvailable, not MemFree |
 | [`system_inventory.py`](host/system_inventory.py) | System inventory with platform, os and shutil — collect live, report from data |
 | [`vmstat_parse.py`](host/vmstat_parse.py) | Parsing `vmstat 1 5` — read columns by header name, drop the boot line |
-| [`vmstat_report.py`](host/vmstat_report.py) | vmstat report v2 — also write a real .xlsx by hand with zipfile and XML |
+| [`vmstat_report.py`](host/vmstat_report.py) | vmstat report v3 — grouped header with merged cells, column widths, real dates |
 
 ## logs
 
@@ -30,7 +30,9 @@ Searching and following logs like `grep`/`tail -F`, colored severity output, `lo
 
 | Example | Notes |
 | --- | --- |
-| [`log_search.py`](logs/log_search.py) | log_search v4 — regular expressions and grep-style context lines |
+| [`failure_alert.py`](logs/failure_alert.py) | failure_alert v2 — timely "clear", cooldown, and success-after-failures |
+| [`log_search.py`](logs/log_search.py) | log_search v5 — follow mode (-f) that survives log rotation |
+| [`logging_handlers.py`](logs/logging_handlers.py) | logging for admin scripts — handlers, formatters, filters, rotation |
 | [`severity_colors.py`](logs/severity_colors.py) | Colored severity output with ANSI escapes — and when not to emit them |
 
 ## remote
@@ -40,6 +42,7 @@ Talking to other hosts: TCP health checks, exception handling that tells failure
 | Example | Notes |
 | --- | --- |
 | [`connect_helper.py`](remote/connect_helper.py) | connect_helper, second fix — specific handlers first, one exception type out |
+| [`retry_backoff.py`](remote/retry_backoff.py) | Retries with exponential backoff, jitter and a deadline — on a fake clock |
 | [`run_command.py`](remote/run_command.py) | subprocess.run for admin scripts — timeout, check, capture and exit codes |
 | [`tcp_health_check.py`](remote/tcp_health_check.py) | TCP health check — tell "refused", "timeout" and "no such host" apart |
 
@@ -51,7 +54,9 @@ Running things on time: `sched`, cron expressions and next-run times, Bash inter
 | --- | --- |
 | [`bash_interop.py`](schedule/bash_interop.py) | Bash <-> Python interop for cron scripts — exit codes and pipes both ways |
 | [`cron_expr.py`](schedule/cron_expr.py) | cron_expr v2 — next-run calculator, with cron's day-of-month/day-of-week OR |
+| [`cron_lock.py`](schedule/cron_lock.py) | cron_lock v2 — fcntl.flock: the kernel owns the lock, nothing goes stale |
 | [`sched_runner.py`](schedule/sched_runner.py) | Job runner with sched and a fake clock — fixed rate, overruns, failing jobs |
+| [`system_check.py`](schedule/system_check.py) | Periodic system check that writes a report — thresholds, atomic files, state changes |
 
 ## hardware
 
@@ -59,10 +64,10 @@ RAID controller reports, IPMI sensors, SEL events, fan monitoring and support bu
 
 | Example | Notes |
 | --- | --- |
-| [`fan_monitor.py`](hardware/fan_monitor.py) | Fan monitor v2: debounce over polls, recovery messages, peer comparison |
+| [`fan_monitor.py`](hardware/fan_monitor.py) | Fan monitor v3: rules as a table, immediate escalation, CPU temp correlation |
 | [`ipmi_sel_events.py`](hardware/ipmi_sel_events.py) | IPMI SEL: turn `ipmitool sel elist` into incidents with durations |
 | [`ipmi_sensor_thresholds.py`](hardware/ipmi_sensor_thresholds.py) | IPMI: parse `ipmitool sensor` and check readings against BMC thresholds |
-| [`megacli_raid_report.py`](hardware/megacli_raid_report.py) | MegaCLI RAID report v2: virtual drives, physical disk errors and rebuilds |
+| [`megacli_raid_report.py`](hardware/megacli_raid_report.py) | MegaCLI RAID report v3: multiple adapters and a Nagios-style result |
 | [`support_bundle_tar.py`](hardware/support_bundle_tar.py) | Support bundle: collect hardware logs into a .tar.gz safely with tarfile |
 
 ## network
@@ -72,11 +77,13 @@ SNMP OIDs and a small BER codec, counter deltas and wrap, utilization graphs, CD
 | Example | Notes |
 | --- | --- |
 | [`cdp_neighbors_description.py`](network/cdp_neighbors_description.py) | CDP neighbors -> `interface ... / description ...` config lines |
-| [`config_diff.py`](network/config_diff.py) | Running-config backup with change detection and a unified diff |
+| [`config_diff.py`](network/config_diff.py) | Running-config backup v2: ignore volatile lines, never print secrets in diffs |
 | [`copp_drop_monitor.py`](network/copp_drop_monitor.py) | CoPP: watch control-plane policing drops between two snapshots |
+| [`eem_rule_engine.py`](network/eem_rule_engine.py) | EEM-style event -> action engine: simulate applets against a syslog stream |
 | [`interface_counter_delta.py`](network/interface_counter_delta.py) | Interface counters v2: Counter32 vs Counter64 deltas, bps and utilization |
 | [`mac_table_description.py`](network/mac_table_description.py) | Access-port descriptions from `show mac address-table` + an inventory map |
 | [`port_classify.py`](network/port_classify.py) | Classify switch ports from `show interfaces status` (fixed-width columns) |
+| [`snmp_ber_codec.py`](network/snmp_ber_codec.py) | SNMP BER codec v2: decode a GetResponse, application types, hostile input |
 | [`snmp_oid_names.py`](network/snmp_oid_names.py) | SNMP: translate numeric OIDs to IF-MIB names and back, without net-snmp MIBs |
 | [`utilization_sparkline.py`](network/utilization_sparkline.py) | Link utilization in the terminal: sparklines and a bar graph from counters |
 
@@ -89,5 +96,5 @@ Shell history and login records: what accounts run, when, and which commands are
 | [`history_per_user.py`](history/history_per_user.py) | Shell history per user: aggregate bash and zsh history files from one host |
 | [`history_timestamps.py`](history/history_timestamps.py) | Shell history with HISTTIMEFORMAT: '#<epoch>' lines, sessions, night work |
 | [`history_top_commands.py`](history/history_top_commands.py) | Shell history: which commands does this account actually run? |
-| [`last_login_activity.py`](history/last_login_activity.py) | Login activity from `last` and `lastlog`: who logs in, from where, how long |
-| [`risky_commands.py`](history/risky_commands.py) | Shell history audit: flag risky commands and redact credentials in the report |
+| [`last_login_activity.py`](history/last_login_activity.py) | Login activity v2: `last` across a year boundary, crashes and lost sessions |
+| [`risky_commands.py`](history/risky_commands.py) | Shell history audit v2: tokenize with shlex instead of matching regexes |

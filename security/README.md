@@ -9,7 +9,7 @@ python3 security/<topic>/<example>.py      # every example runs on its own
 python3 scripts/check.py security          # run all and compare with the # Output: blocks
 ```
 
-49 examples, checked on Python 3.13, Python 3.14.
+65 examples, checked on Python 3.13, Python 3.14, Python 3.15.
 
 ## injection
 
@@ -17,6 +17,8 @@ Commands, arguments, SQL, eval, templates, logs and CSV exports.
 
 | CWE | Example | Notes |
 | --- | --- | --- |
+| CWE-1236 | [`csv_formula_injection.py`](injection/csv_formula_injection.py) | CSV formula injection — exported cells that start with = run |
+| CWE-117 | [`cwe117_log_injection.py`](injection/cwe117_log_injection.py) | log injection — user input can forge log lines |
 | CWE-78 | [`cwe78_os_command_injection.py`](injection/cwe78_os_command_injection.py) | OS command injection — build argument lists, never shell strings |
 | CWE-78 | [`cwe78_shlex_quote.py`](injection/cwe78_shlex_quote.py) | when a shell string is unavoidable, quote with shlex.quote |
 | CWE-88 | [`cwe88_argument_injection.py`](injection/cwe88_argument_injection.py) | argument injection — a file name that starts with "-" is an option |
@@ -50,6 +52,8 @@ HTML escaping by context, URL schemes, open redirects, header injection and SSRF
 
 | CWE | Example | Notes |
 | --- | --- | --- |
+| CWE-113 | [`cwe113_header_crlf_injection.py`](web/cwe113_header_crlf_injection.py) | HTTP response splitting — CR/LF in a header value adds headers |
+| CWE-601 | [`cwe601_open_redirect.py`](web/cwe601_open_redirect.py) | open redirect — "?next=" must stay on your own site |
 | CWE-79 | [`cwe79_html_escape_context.py`](web/cwe79_html_escape_context.py) | cross-site scripting — escaping depends on where the value lands |
 | CWE-79 | [`cwe79_url_scheme_allowlist.py`](web/cwe79_url_scheme_allowlist.py) | user-supplied links — escaping is not enough inside href |
 | CWE-918 | [`cwe918_ssrf_ip_checks.py`](web/cwe918_ssrf_ip_checks.py) | SSRF — check the address you will connect to, not the string you got |
@@ -61,9 +65,15 @@ Validation, numbers and Unicode, ReDoS, resource limits, pickle and XML.
 
 | CWE | Example | Notes |
 | --- | --- | --- |
+| CWE-1333 | [`cwe1333_redos.py`](parsing/cwe1333_redos.py) | ReDoS — nested quantifiers backtrack exponentially |
+| CWE-20 | [`cwe20_allowlist_validation.py`](parsing/cwe20_allowlist_validation.py) | input validation — an allow-list regex is only as strict as its anchors |
+| CWE-400 | [`cwe400_int_max_str_digits.py`](parsing/cwe400_int_max_str_digits.py) | huge integers — keep sys.set_int_max_str_digits and add your own bound |
+| CWE-400 | [`cwe400_json_nesting_depth.py`](parsing/cwe400_json_nesting_depth.py) | uncontrolled resource consumption — bound JSON before you parse it |
 | CWE-502 | [`cwe502_pickle_deserialization.py`](parsing/cwe502_pickle_deserialization.py) | deserialization of untrusted data — pickle.loads runs code |
 | CWE-611 | [`cwe611_xml_external_entities.py`](parsing/cwe611_xml_external_entities.py) | XML external entities (XXE) — which stdlib parser reads files |
 | CWE-776 | [`cwe776_xml_entity_expansion.py`](parsing/cwe776_xml_entity_expansion.py) | XML entity expansion — what the stdlib parsers really accept |
+| CWE-1287 | [`int_parsing_unicode_digits.py`](parsing/int_parsing_unicode_digits.py) | int() and float() accept far more than ASCII digits |
+| CWE-1289 | [`unicode_username_normalization.py`](parsing/unicode_username_normalization.py) | Unicode usernames — compare canonical forms, block confusables |
 
 ## crypto
 
@@ -72,6 +82,7 @@ Randomness, hashes, MACs and KDFs, constant-time comparison, identifiers and int
 | CWE | Example | Notes |
 | --- | --- | --- |
 | CWE-208 | [`constant_time_compare.py`](crypto/constant_time_compare.py) | timing side channel — compare MACs and tokens with hmac.compare_digest |
+| CWE-354 | [`file_integrity_manifest.py`](crypto/file_integrity_manifest.py) | file integrity manifests — sha256sum-style create and verify, done fully |
 | CWE-328 | [`hashlib_basics.py`](crypto/hashlib_basics.py) | weak hashes — hashlib basics, usedforsecurity, and digest misuse |
 | — | [`hkdf_rfc5869.py`](crypto/hkdf_rfc5869.py) | HKDF from hmac, verified against RFC 5869 — one master key, independent subkeys |
 | — | [`hmac_rfc4231.py`](crypto/hmac_rfc4231.py) | HMAC-SHA-256/512 checked against the RFC 4231 test vectors |
@@ -79,6 +90,7 @@ Randomness, hashes, MACs and KDFs, constant-time comparison, identifiers and int
 | — | [`pbkdf2_rfc6070.py`](crypto/pbkdf2_rfc6070.py) | PBKDF2 checked against RFC 6070 — and why dkLen > hash length helps the attacker |
 | — | [`scrypt_parameters.py`](crypto/scrypt_parameters.py) | scrypt parameters — N, r, p, memory, maxmem, and the RFC 7914 test vectors |
 | CWE-338 | [`secrets_vs_random.py`](crypto/secrets_vs_random.py) | weak PRNG for security tokens — use secrets, never random |
+| — | [`token_formats.py`](crypto/token_formats.py) | Token formats — prefixed, checksummed API tokens that secret scanners can find |
 | CWE-340 | [`uuid7_time_leak.py`](crypto/uuid7_time_leak.py) | uuid.uuid7() (Python 3.14) — great primary key, poor public ID, no token |
 | CWE-340 | [`uuid_leaks.py`](crypto/uuid_leaks.py) | predictable identifiers — uuid1 leaks time and MAC, uuid4 does not |
 | CWE-261/CWE-327 | [`xor_base64_not_encryption.py`](crypto/xor_base64_not_encryption.py) | base64 and XOR are not encryption |
@@ -89,10 +101,12 @@ Password storage, JWT, sessions, CSRF, rate limiting and lockout.
 
 | CWE | Example | Notes |
 | --- | --- | --- |
+| CWE-307/CWE-645 | [`account_lockout.py`](auth/account_lockout.py) | account lockout — temporary, escalating, and checked before the password |
 | CWE-352 | [`csrf_double_submit.py`](auth/csrf_double_submit.py) | CSRF — the double-submit token has to be signed and bound to the session |
 | CWE-347 | [`jwt_hs256.py`](auth/jwt_hs256.py) | JWT validation — claims, `alg: none`, and RS256/HS256 algorithm confusion |
 | CWE-916 | [`password_storage.py`](auth/password_storage.py) | password hashing — salted scrypt/PBKDF2 strings and upgrade-on-login rehash |
 | CWE-384 | [`session_tokens.py`](auth/session_tokens.py) | session fixation — rotate the session id at login, store only its hash |
+| CWE-307 | [`token_bucket_rate_limit.py`](auth/token_bucket_rate_limit.py) | login rate limiting — token buckets keyed by IP *and* by account |
 
 ## secrets
 
@@ -100,6 +114,7 @@ Keeping secrets out of logs and `repr`, loading them safely, scanning for them, 
 
 | CWE | Example | Notes |
 | --- | --- | --- |
+| — | [`audit_hooks.py`](secrets/audit_hooks.py) | PEP 578 audit hooks — see which files, processes and sockets a dependency touches |
 | CWE-532 | [`log_masking_filter.py`](secrets/log_masking_filter.py) | secrets in logs — redact with a logging.Filter on the handler |
 | CWE-532 | [`repr_redaction.py`](secrets/repr_redaction.py) | secrets leaking through repr — redact at the type, not at every call site |
 | CWE-732 | [`secret_files_permissions.py`](secrets/secret_files_permissions.py) | loading secrets — env vars leak to children, files need permission checks |
@@ -114,10 +129,12 @@ Pinned hashes, requirement audits, typosquats and resource limits for helpers.
 | --- | --- | --- |
 | CWE-494 | [`hash_pinned_downloads.py`](supply-chain/hash_pinned_downloads.py) | download without integrity check — verify against hashes pinned in the lock |
 | CWE-829 | [`requirements_audit.py`](supply-chain/requirements_audit.py) | untrusted dependency sources — audit requirements for pins, URLs and VCS refs |
+| CWE-770 | [`rlimit_untrusted_helper.py`](supply-chain/rlimit_untrusted_helper.py) | running untrusted helpers — cap CPU, file size and descriptors with rlimits |
 | — | [`typosquat_detector.py`](supply-chain/typosquat_detector.py) | Typosquatting — flag new dependencies one typo away from a popular package |
 
 ## CWE index
 
+- [CWE-20](https://cwe.mitre.org/data/definitions/20.html): [`cwe20_allowlist_validation.py`](parsing/cwe20_allowlist_validation.py)
 - [CWE-22](https://cwe.mitre.org/data/definitions/22.html): [`cwe22_path_traversal.py`](files/cwe22_path_traversal.py), [`tar_links_and_filters.py`](files/tar_links_and_filters.py), [`tar_slip_extraction_filter.py`](files/tar_slip_extraction_filter.py), [`zip_slip.py`](files/zip_slip.py)
 - [CWE-59](https://cwe.mitre.org/data/definitions/59.html): [`cwe59_symlink_following.py`](files/cwe59_symlink_following.py), [`tar_links_and_filters.py`](files/tar_links_and_filters.py)
 - [CWE-78](https://cwe.mitre.org/data/definitions/78.html): [`cwe78_os_command_injection.py`](injection/cwe78_os_command_injection.py), [`cwe78_shlex_quote.py`](injection/cwe78_shlex_quote.py), [`tstring_html_shell.py`](injection/tstring_html_shell.py)
@@ -125,25 +142,37 @@ Pinned hashes, requirement audits, typosquats and resource limits for helpers.
 - [CWE-88](https://cwe.mitre.org/data/definitions/88.html): [`cwe88_argument_injection.py`](injection/cwe88_argument_injection.py)
 - [CWE-89](https://cwe.mitre.org/data/definitions/89.html): [`cwe89_dynamic_identifiers.py`](injection/cwe89_dynamic_identifiers.py), [`cwe89_sql_injection.py`](injection/cwe89_sql_injection.py), [`tstring_safe_sql.py`](injection/tstring_safe_sql.py)
 - [CWE-95](https://cwe.mitre.org/data/definitions/95.html): [`cwe95_eval_sandbox_escape.py`](injection/cwe95_eval_sandbox_escape.py), [`cwe95_eval_vs_literal_eval.py`](injection/cwe95_eval_vs_literal_eval.py)
+- [CWE-113](https://cwe.mitre.org/data/definitions/113.html): [`cwe113_header_crlf_injection.py`](web/cwe113_header_crlf_injection.py)
+- [CWE-117](https://cwe.mitre.org/data/definitions/117.html): [`cwe117_log_injection.py`](injection/cwe117_log_injection.py)
 - [CWE-208](https://cwe.mitre.org/data/definitions/208.html): [`constant_time_compare.py`](crypto/constant_time_compare.py)
 - [CWE-261](https://cwe.mitre.org/data/definitions/261.html): [`xor_base64_not_encryption.py`](crypto/xor_base64_not_encryption.py)
+- [CWE-307](https://cwe.mitre.org/data/definitions/307.html): [`account_lockout.py`](auth/account_lockout.py), [`token_bucket_rate_limit.py`](auth/token_bucket_rate_limit.py)
 - [CWE-327](https://cwe.mitre.org/data/definitions/327.html): [`naive_mac_length_extension.py`](crypto/naive_mac_length_extension.py), [`xor_base64_not_encryption.py`](crypto/xor_base64_not_encryption.py)
 - [CWE-328](https://cwe.mitre.org/data/definitions/328.html): [`hashlib_basics.py`](crypto/hashlib_basics.py)
 - [CWE-338](https://cwe.mitre.org/data/definitions/338.html): [`secrets_vs_random.py`](crypto/secrets_vs_random.py)
 - [CWE-340](https://cwe.mitre.org/data/definitions/340.html): [`uuid7_time_leak.py`](crypto/uuid7_time_leak.py), [`uuid_leaks.py`](crypto/uuid_leaks.py)
 - [CWE-347](https://cwe.mitre.org/data/definitions/347.html): [`jwt_hs256.py`](auth/jwt_hs256.py)
 - [CWE-352](https://cwe.mitre.org/data/definitions/352.html): [`csrf_double_submit.py`](auth/csrf_double_submit.py)
+- [CWE-354](https://cwe.mitre.org/data/definitions/354.html): [`file_integrity_manifest.py`](crypto/file_integrity_manifest.py)
 - [CWE-367](https://cwe.mitre.org/data/definitions/367.html): [`cwe367_toctou_open_flags.py`](files/cwe367_toctou_open_flags.py)
 - [CWE-377](https://cwe.mitre.org/data/definitions/377.html): [`cwe377_insecure_temp_file.py`](files/cwe377_insecure_temp_file.py)
 - [CWE-384](https://cwe.mitre.org/data/definitions/384.html): [`session_tokens.py`](auth/session_tokens.py)
+- [CWE-400](https://cwe.mitre.org/data/definitions/400.html): [`cwe400_int_max_str_digits.py`](parsing/cwe400_int_max_str_digits.py), [`cwe400_json_nesting_depth.py`](parsing/cwe400_json_nesting_depth.py)
 - [CWE-494](https://cwe.mitre.org/data/definitions/494.html): [`hash_pinned_downloads.py`](supply-chain/hash_pinned_downloads.py)
 - [CWE-502](https://cwe.mitre.org/data/definitions/502.html): [`cwe502_pickle_deserialization.py`](parsing/cwe502_pickle_deserialization.py)
 - [CWE-532](https://cwe.mitre.org/data/definitions/532.html): [`log_masking_filter.py`](secrets/log_masking_filter.py), [`repr_redaction.py`](secrets/repr_redaction.py), [`tstring_log_redaction.py`](secrets/tstring_log_redaction.py)
+- [CWE-601](https://cwe.mitre.org/data/definitions/601.html): [`cwe601_open_redirect.py`](web/cwe601_open_redirect.py)
 - [CWE-611](https://cwe.mitre.org/data/definitions/611.html): [`cwe611_xml_external_entities.py`](parsing/cwe611_xml_external_entities.py)
+- [CWE-645](https://cwe.mitre.org/data/definitions/645.html): [`account_lockout.py`](auth/account_lockout.py)
 - [CWE-732](https://cwe.mitre.org/data/definitions/732.html): [`cwe732_permissions_umask.py`](files/cwe732_permissions_umask.py), [`secret_files_permissions.py`](secrets/secret_files_permissions.py)
+- [CWE-770](https://cwe.mitre.org/data/definitions/770.html): [`rlimit_untrusted_helper.py`](supply-chain/rlimit_untrusted_helper.py)
 - [CWE-776](https://cwe.mitre.org/data/definitions/776.html): [`cwe776_xml_entity_expansion.py`](parsing/cwe776_xml_entity_expansion.py)
 - [CWE-798](https://cwe.mitre.org/data/definitions/798.html): [`secret_scanner.py`](secrets/secret_scanner.py)
 - [CWE-829](https://cwe.mitre.org/data/definitions/829.html): [`requirements_audit.py`](supply-chain/requirements_audit.py)
 - [CWE-916](https://cwe.mitre.org/data/definitions/916.html): [`password_storage.py`](auth/password_storage.py)
 - [CWE-918](https://cwe.mitre.org/data/definitions/918.html): [`cwe918_ssrf_ip_checks.py`](web/cwe918_ssrf_ip_checks.py), [`cwe918_url_parser_confusion.py`](web/cwe918_url_parser_confusion.py)
+- [CWE-1236](https://cwe.mitre.org/data/definitions/1236.html): [`csv_formula_injection.py`](injection/csv_formula_injection.py)
+- [CWE-1287](https://cwe.mitre.org/data/definitions/1287.html): [`int_parsing_unicode_digits.py`](parsing/int_parsing_unicode_digits.py)
+- [CWE-1289](https://cwe.mitre.org/data/definitions/1289.html): [`unicode_username_normalization.py`](parsing/unicode_username_normalization.py)
+- [CWE-1333](https://cwe.mitre.org/data/definitions/1333.html): [`cwe1333_redos.py`](parsing/cwe1333_redos.py)
 - [CWE-1336](https://cwe.mitre.org/data/definitions/1336.html): [`format_string_injection.py`](injection/format_string_injection.py)
